@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../../assets/favicon.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -2595,6 +2595,12 @@ in or writes them as sidecar files. See <a href="../../../guide/subtitles/">Subt
 <td><em>(unset)</em></td>
 <td>Languages to sort to the top, in the order you give. The rest keep the default order: original language first, then alphabetical. Nothing is removed.</td>
 </tr>
+<tr>
+<td><code>dedupe_codecs</code></td>
+<td>list</td>
+<td><em>(unset)</em></td>
+<td>Subtitle codecs in order of preference, by value or name, for example <code>[VTT, STPP, WVTT]</code>. When tracks of the same language, forced/SDH/CC type and name come in several listed codecs, unshackle drops the ones in a later codec. It always keeps codecs you leave out. Unset keeps every track.</td>
+</tr>
 </tbody>
 </table>
 <div class="language-yaml highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nt">subtitle</span><span class="p">:</span>
@@ -2737,6 +2743,18 @@ bitrate alone, with those same Atmos/descriptive rules still applied.</p>
 <td>Merge video tracks that share height, range, and codec into one file, so only language varies inside a file. <code>--merge-video</code> on the CLI flips this on.</td>
 </tr>
 <tr>
+<td><code>track_names</code></td>
+<td>str</td>
+<td><code>english</code></td>
+<td>The language of the name unshackle gives a track that the service left unnamed: <code>english</code> (<code>Chinese (Traditional)</code>), <code>native</code>, the name in the language itself (<code>中文（繁體）</code>), or <code>none</code>, which leaves the track unnamed. Read <a href="../../../guide/output-and-naming/#track-names-and-language-tags">Track names and language tags</a>.</td>
+</tr>
+<tr>
+<td><code>original_label</code></td>
+<td>str</td>
+<td>unset</td>
+<td>Text that unshackle adds after the name of an audio or subtitle track in the title's original language, such as <code>[Original]</code>. Read <a href="../../../guide/output-and-naming/#track-names-and-language-tags">Track names and language tags</a>.</td>
+</tr>
+<tr>
 <td><code>concurrency</code></td>
 <td>int</td>
 <td><code>4</code></td>
@@ -2771,12 +2789,16 @@ bitrate alone, with those same Atmos/descriptive rules still applied.</p>
 <td>At least one audio language matches.</td>
 </tr>
 <tr>
+<td><code>audio_contain_all</code></td>
+<td>Every listed language must be present in the audio.</td>
+</tr>
+<tr>
 <td><code>subs_contain</code></td>
 <td>At least one subtitle language matches.</td>
 </tr>
 <tr>
 <td><code>subs_contain_all</code></td>
-<td>Every listed language must be present.</td>
+<td>Every listed language must be present in the subtitles.</td>
 </tr>
 <tr>
 <td><code>dual</code> / <code>multi</code> / <code>dubbed</code></td>
@@ -2785,12 +2807,12 @@ bitrate alone, with those same Atmos/descriptive rules still applied.</p>
 </tbody>
 </table>
 <p>Each language condition takes one language tag or a list of them. A list matches when <strong>any</strong>
-entry matches, except <code>subs_contain_all</code>, which needs them all. An entry that is not a valid
-language tag (for example <code>japanese</code>) never matches. A tag with a region matches only that
-variant, so <code>audio: es-419</code> does not match <code>es-ES</code> audio. <code>dual</code>, <code>multi</code> and <code>dubbed</code> take a bare
-<code>true</code> or <code>false</code>, not a quoted string. unshackle skips a rule with a condition name it does
-not know, or with any other value in a boolean condition. It logs a warning in each of these
-cases and tries the next rule.</p>
+entry matches, except <code>audio_contain_all</code> and <code>subs_contain_all</code>, which need them all. An empty
+list never matches. An entry that is not a valid language tag (for example <code>japanese</code>) never
+matches. A tag with a region matches only that variant, so <code>audio: es-419</code> does not match
+<code>es-ES</code> audio. <code>dual</code>, <code>multi</code> and <code>dubbed</code> take a bare <code>true</code> or <code>false</code>, not a quoted string.
+unshackle skips a rule with a condition name it does not know, or with any other value in a
+boolean condition. It logs a warning in each of these cases and tries the next rule.</p>
 <p><code>dual</code>, <code>multi</code> and <code>dubbed</code> carry the same meaning as the
 <a href="#dual_multi_mode">filename variables of those names</a>. Pair one with a language to name a
 release yourself, in place of the fixed <code>DUAL</code>, <code>MULTi</code> and <code>DUBBED</code> text. A rule that names
@@ -2807,6 +2829,22 @@ release yourself, in place of the fixed <code>DUAL</code>, <code>MULTi</code> an
 </span><span id="__span-10-10"><a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="w">      </span><span class="nt">dual</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
 </span><span id="__span-10-11"><a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">      </span><span class="nt">tag</span><span class="p">:</span><span class="w"> </span><span class="s">"THAIDUAL"</span>
 </span></code></pre></div>
+<p>unshackle examines the rules in order, so put a rule that needs more languages before a rule that
+needs fewer. Here, a release with both French dubs gets <code>VF2</code>, not <code>VFQ</code>:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="nt">language_tags</span><span class="p">:</span>
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="w">  </span><span class="nt">rules</span><span class="p">:</span>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">audio_contain_all</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">fr-FR</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">fr-CA</span><span class="p p-Indicator">]</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="w">      </span><span class="nt">tag</span><span class="p">:</span><span class="w"> </span><span class="s">"VF2"</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">audio</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">fr-CA</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="w">      </span><span class="nt">tag</span><span class="p">:</span><span class="w"> </span><span class="s">"VFQ"</span>
+</span><span id="__span-11-7"><a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">audio</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">fr-FR</span>
+</span><span id="__span-11-8"><a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="w">      </span><span class="nt">tag</span><span class="p">:</span><span class="w"> </span><span class="s">"VFF"</span>
+</span></code></pre></div>
+<div class="admonition tip">
+<p class="admonition-title">Give regional tags in an <code>_all</code> list</p>
+<p>A tag without a region also matches a regional track, so one <code>fr-CA</code> track satisfies both
+entries of <code>[fr, fr-CA]</code>. Use <code>[fr-FR, fr-CA]</code> to require two different tracks.</p>
+</div>
 <div class="admonition note">
 <p class="admonition-title">Put <code>{lang_tag}</code> where you want the name</p>
 <p>These rules fill <code>{lang_tag}</code>. To use your own name in place of the fixed text, keep
@@ -2869,12 +2907,15 @@ release yourself, in place of the fixed <code>DUAL</code>, <code>MULTi</code> an
 </div>
 </div>
 </div>
-<div class="language-yaml highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="nt">dual_multi_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">strict</span>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="nt">dual_multi_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">strict</span>
 </span></code></pre></div>
 <div class="admonition note">
 <p class="admonition-title">Dialects count as one language</p>
 <p>Regional variants of the same base language (e.g. <code>en-US</code> and <code>en-GB</code>) collapse to a single
-language in both modes, so they never trigger <code>{dual}</code> on their own.</p>
+language in both modes, so they never trigger <code>{dual}</code> on their own. An individual language
+counts as its macrolanguage: <code>cmn</code> and <code>zh</code> are one language, and so are <code>arb</code> and <code>ar</code>.
+Norwegian <code>nb</code> (Bokmål) and <code>nn</code> (Nynorsk) count as <code>no</code>.
+Cantonese (<code>yue</code>) stays separate, so <code>cmn</code> and <code>yue</code> audio give <code>{dual}</code>.</p>
 </div>
 <h2 id="hdr10plus_probe"><code>hdr10plus_probe</code><a class="headerlink" href="#hdr10plus_probe" title="Permanent link">&para;</a></h2>
 <ul>
@@ -2917,7 +2958,7 @@ probes the two highest and the two lowest bitrates first:</p>
 unshackle does not probe ISM tracks. Each probe makes one to three small requests: the 64 KiB
 fragment, plus the playlist of an HLS track or the header of a one-file track. The probes run in
 parallel, with no more at a time than <code>--workers</code> (or <code>dl.workers</code>) sets for a track download.</p>
-<div class="language-yaml highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="nt">hdr10plus_probe</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="nt">hdr10plus_probe</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
 </span></code></pre></div>
 <p>A remote server probes its tracks before it sends them, so the setting on the server applies to
 remote downloads and to the REST API.</p>
@@ -2950,7 +2991,7 @@ same peak and letterbox area. They differ in the scene average, which the TV use
 </tr>
 </tbody>
 </table>
-<div class="language-yaml highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="nt">generate_dv_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">v29</span>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="nt">generate_dv_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">v29</span>
 </span></code></pre></div>
 <p>The setting applies on the machine that runs the hybrid step: the client for a remote download, the
 server for a REST API job.</p>
@@ -3051,10 +3092,10 @@ server for a REST API job.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/favicon.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -2537,7 +2537,10 @@ shown in track listings. The <strong>Extension</strong> column is the file exten
 <p><code>fTTML</code> (STPP) and <code>fVTT</code> (WVTT) are the fragmented, MP4-box-encapsulated forms that
 DASH and HLS deliver. You never keep these as-is: right after download they are
 unwrapped into their plain counterparts (<code>fTTML</code> becomes TTML and <code>fVTT</code> becomes
-WebVTT), so you always end up with an editable text subtitle. Note that this is a
+WebVTT), so you always end up with an editable text subtitle. For a DASH track, the
+unwrap also subtracts the manifest's <code>presentationTimeOffset</code> from the cue times, so the
+subtitles stay in sync with the video. For an ISM track whose cues count from the start of
+each fragment, the unwrap moves every cue onto the timeline of the track. Note that this is a
 one-way, source-only relationship: you can convert <em>from</em> these boxed formats, but no
 backend can write them as an output target, so they can never be a conversion
 destination.</p>
@@ -2550,7 +2553,7 @@ format-appropriate clean-up to make a single, valid file:</p>
   <code>&amp;lrm;</code> / <code>&amp;rlm;</code> bidirectional entities.</li>
 <li><strong>Segment merging</strong>: when a WebVTT or boxed subtitle arrives as many DASH/HLS
   segments, unshackle merges the segments back into one continuous document with
-  correct timing.</li>
+  correct timing. A cue that a segment boundary cuts in two comes out as one cue.</li>
 <li><strong>WebVTT sanitization</strong>: merged WebVTT runs through a repair pipeline that clamps
   negative timestamps to <code>00:00:00.000</code>, removes stray cue identifiers (like <code>Q0</code>, <code>Q1</code>)
   that confuse downstream parsers, and merges multi-line cues that a service split into
@@ -3080,6 +3083,12 @@ relevant font packages.</p>
 <td>a list of languages</td>
 <td>Languages to sort to the top. The rest keep the default order. Nothing is removed.</td>
 </tr>
+<tr>
+<td><code>dedupe_codecs</code></td>
+<td><em>(unset)</em></td>
+<td>a list of codecs, e.g. <code>[VTT, STPP, WVTT]</code></td>
+<td>Keep one copy of a subtitle that the service sends in several codecs: the earliest listed codec wins.</td>
+</tr>
 </tbody>
 </table>
 <h3 id="which-settings-to-change">Which settings to change<a class="headerlink" href="#which-settings-to-change" title="Permanent link">&para;</a></h3>
@@ -3112,6 +3121,10 @@ only when you want something the defaults do not do:</p>
 <tr>
 <td>No stripped copies made at all</td>
 <td><code>strip_sdh: false</code></td>
+</tr>
+<tr>
+<td>One copy of each subtitle when the service sends the same one in several codecs</td>
+<td><code>dedupe_codecs: [VTT, STPP, WVTT]</code></td>
 </tr>
 <tr>
 <td>One backend for every conversion, whatever you install</td>
@@ -3266,10 +3279,10 @@ knowing when working with subtitle tracks in code:</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

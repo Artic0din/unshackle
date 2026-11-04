@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../../assets/favicon.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -2243,8 +2243,9 @@ Every other endpoint refuses the dashboard key, and the dashboard refuses user k
 routes are available in <code>--remote-only</code> mode too.</p>
 <p>Run the server headless with <code>--quiet</code>: no banner, no Rich output, one plain log line per
 event on stderr, and <code>api.*</code> loggers stay at <code>INFO</code> so remote session activity reaches the
-log ring. Add <code>--debug</code> to raise the level to <code>DEBUG</code> and also write the full log to
-<code>directories.logs</code> as <code>unshackle_serve_&lt;time&gt;.log</code>. Nothing else the dashboard shows reaches
+log ring. The log ring and the event stream do not get <code>aiohttp.access</code> request lines.
+Add <code>--debug</code> to raise the level to <code>DEBUG</code>, send the request lines to the log ring too,
+and write the full log to <code>directories.logs</code> as <code>unshackle_serve_&lt;time&gt;.log</code>. Nothing else the dashboard shows reaches
 the disk: stats, the log ring and the event stream live in memory and reset on restart, so a
 dashboard UI that wants history must keep its own copy.</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>unshackle serve --remote-only --quiet
@@ -2281,7 +2282,7 @@ dashboard UI that wants history must keep its own copy.</p>
 </tr>
 <tr>
 <td><code>/api/dashboard/logs</code></td>
-<td><code>{"seq": N, "records": [...]}</code>: the last 1000 log records. <code>?since=&lt;seq&gt;</code> returns only newer records; <code>?level=WARNING</code> sets the minimum level; <code>?logger=serve</code> keeps one logger and its children (<code>aiohttp.access</code> is the noisiest). <code>ts</code> is a Unix epoch in seconds.</td>
+<td><code>{"seq": N, "records": [...]}</code>: the last 1000 log records. <code>?since=&lt;seq&gt;</code> returns only newer records; <code>?level=WARNING</code> sets the minimum level; <code>?logger=serve</code> keeps one logger and its children. <code>ts</code> is a Unix epoch in seconds.</td>
 </tr>
 <tr>
 <td><code>/api/dashboard/cdm-logs</code></td>
@@ -2297,7 +2298,7 @@ dashboard UI that wants history must keep its own copy.</p>
 </tr>
 <tr>
 <td><code>/api/dashboard/services</code></td>
-<td>Every service configured on this server and its load state, including the ones that failed to import. See <a href="#services">Services</a> for what configured means.</td>
+<td>Every service configured on this server, its load state and its catalogue entry, including the services that failed to import. See <a href="#services">Services</a> for what configured means.</td>
 </tr>
 <tr>
 <td><code>/api/dashboard/health</code></td>
@@ -2305,7 +2306,7 @@ dashboard UI that wants history must keep its own copy.</p>
 </tr>
 <tr>
 <td><code>/api/dashboard/events</code></td>
-<td>Server-Sent Events stream. With <code>?since=&lt;seq&gt;</code> it returns <code>{"seq", "stats", "events": [...]}</code> instead: every event after <code>seq</code> (the server keeps the last 20000, log records included, so a poll every few seconds is safe even under a busy access log) as one JSON burst, so a UI that polls every few seconds still sees a remote session that opened and closed in between.</td>
+<td>Server-Sent Events stream. With <code>?since=&lt;seq&gt;</code> it returns <code>{"seq", "stats", "events": [...]}</code> instead: every event after <code>seq</code> (the server keeps the last 20000, log records included, so a poll every few seconds is safe) as one JSON burst, so a UI that polls every few seconds still sees a remote session that opened and closed in between.</td>
 </tr>
 </tbody>
 </table>
@@ -2334,7 +2335,7 @@ those it sends:</p>
 </tr>
 <tr>
 <td><code>session</code></td>
-<td><code>action</code> (<code>create</code>, <code>update</code> on every request the session makes and when titles or tracks load, or <code>delete</code>) plus the full remote session summary, so each event is a complete snapshot. A <code>delete</code> also carries <code>reason</code>: <code>closed</code> (the client ended it), <code>expired</code> (TTL sweep) or <code>evicted</code> (<code>max_sessions</code> reached). A session opened by <code>--skip-dl</code> can live only a few seconds, so a UI that wants history must keep its own record of these events.</td>
+<td><code>action</code> (<code>create</code>, <code>update</code> on every request the session makes and when titles or tracks load, or <code>delete</code>) plus the remote session summary. The <code>update</code> for a request carries that request as <code>action_entry</code> and has no <code>actions</code>: append it to the log you hold, capped at 500. Every other event is a complete snapshot with <code>actions</code>. A <code>delete</code> also carries <code>reason</code>: <code>closed</code> (the client ended it), <code>expired</code> (TTL sweep) or <code>evicted</code> (<code>max_sessions</code> reached). A session opened by <code>--skip-dl</code> can live only a few seconds, so a UI that wants history must keep its own record of these events.</td>
 </tr>
 <tr>
 <td><code>job</code></td>
@@ -2517,7 +2518,7 @@ here, so use <code>id</code> as the identity and <code>label</code> only for dis
 </tr>
 </tbody>
 </table>
-<p>Only a configured API key gets a row of counters. A request on an open route such as <code>/api/health</code> with an unknown key counts as <code>anonymous</code>, so an unauthenticated caller cannot grow the table.</p>
+<p>Only a configured API key gets a row of counters. A request that answers with an unknown key counts as <code>anonymous</code>, so an unauthenticated caller cannot grow the table.</p>
 <p>Every API key the server counts has a row here, the dashboard key included, so a
 <code>requests_by_key</code> bucket other than <code>anonymous</code> always matches one. A "traffic by key" panel
 reads the rows here, which are unambiguous, and takes <code>anonymous</code> from <code>requests_by_key</code>. Read
@@ -2546,7 +2547,10 @@ limit never applies to the dashboard key, and never to <code>/api/health</code>.
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>[{"tag": "EXAMPLE", "state": "staged", "error": null,
 </span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>  "commit": "9cc230c98f13b83f6c6fe831595b9702d3ba2786", "staged_commit": "5f0aa17...",
 </span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>  "staged_since": 1756908900.0, "sessions": 1, "jobs": 1,
-</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>  "aliases": ["EXMPL"], "geofence": ["US"], "geoblock": []}]
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>  "aliases": ["EXMPL"], "geofence": ["US"], "geoblock": [],
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>  "help": "...", "url": "https://www.service.example", "title_regex": "...", "cli_params": [...],
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>  "needs_auth": true, "auth_methods": ["cookies"], "has_search": true, "anonymous_search": false,
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>  "has_drm": true, "server_accounts": {"regions": ["gb", "us"], "global": false}}]
 </span></code></pre></div>
 <p>The list holds only the services configured on this server:</p>
 <ol>
@@ -2572,6 +2576,13 @@ here instead of disappearing, and <code>/status</code> still counts it in the se
 pull already happened, so <code>commit</code> (what runs now) and <code>staged_commit</code> (what waits) differ. It swaps in when the last job and the last remote session for that tag finish. Both commits are <code>null</code>
 for a service from a plain local directory rather than a git repo.</p>
 <p>Watch the <code>service</code> event rather than polling for the swap.</p>
+<p>Each row also carries the service's catalogue entry: the fields that
+<a href="../endpoints/#get-apiservices"><code>GET /api/services</code></a> sends, with the same meaning. A service with no loaded
+module, or whose catalogue entry fails, gets only <code>help</code>, <code>url</code> and <code>title_regex</code>, all <code>null</code>.
+A service whose re-import failed keeps the entry of the module that still runs.</p>
+<p><code>server_accounts</code> shows when <code>serve.server_accounts</code> names the service. No API key grant
+applies to it here: <code>/api/services</code> sends it only to an API key with the <code>server_accounts</code>
+grant, but the dashboard key sees it for every service.</p>
 <h2 id="health">Health<a class="headerlink" href="#health" title="Permanent link">&para;</a></h2>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>GET /api/dashboard/health
 </span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>{"generated_at": 1756909350.4, "status": "ok",
@@ -2712,10 +2723,10 @@ without any extra field.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

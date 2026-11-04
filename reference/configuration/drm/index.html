@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../../assets/favicon.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -2144,8 +2144,10 @@ run and skips any quality or Widevine/PlayReady sub-entries.</p>
 CDM. A per-service entry does the same when it names a device without a quality: a device name,
 a <code>widevine</code> or <code>playready</code> sub-entry, or a profile or <code>default</code> sub-entry. A per-service entry
 that selects only by quality, or only for a different profile, loads no device when the run
-starts. unshackle then shows a warning, and the server decides who licenses the remote session.
-With only the top-level <code>default</code> entry, the server CDM licenses when the API key has it. See
+starts. When <code>server_cdm</code> is unset, unshackle then shows a warning, and the server decides who
+licenses the remote session.
+With only the top-level <code>default</code> entry, the server CDM licenses when the API key has it. Set
+<code>server_cdm: true</code> on the server entry to keep a per-service entry for local runs only. See
 <a href="../services/#remote_services"><code>remote_services</code></a>.</p>
 <div class="language-yaml highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">cdm</span><span class="p">:</span>
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="nt">default</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">chromecdm_l3</span>
@@ -2168,7 +2170,11 @@ height is known. If the value is still a dict after that, unshackle uses
 <p>When an entry holds <code>widevine</code> and <code>playready</code>, their order sets which device unshackle loads
 first. A track that offers the two DRM systems licenses with that system. A track that offers
 only the other system uses the other device. A <code>widevine</code> / <code>playready</code> dict in a quality key
-does not set the order. The server CDM of a remote session follows the same order.</p>
+does not set the order.</p>
+<p>On a server, an entry that holds <code>widevine</code> and <code>playready</code> gives a remote session the server CDM
+of the DRM system of the client's local CDM. The service then makes its manifest for that system,
+so the client's vault keys and its own device apply to the tracks. A client with no local CDM gets
+the device that the entry lists first.</p>
 <p>A quality key can also hold a dict of <code>widevine</code> / <code>playready</code> devices, and so can the
 top-level <code>default</code> entry:</p>
 <div class="language-yaml highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">cdm</span><span class="p">:</span>
@@ -2380,6 +2386,11 @@ case-insensitively. <code>"mp4decrypt"</code> selects Bento4's mp4decrypt, and <
 (including <code>"shaka"</code>) selects shaka-packager. When the value is a dict, unshackle compares the
 service tag case-insensitively and uses the <code>default</code> entry as the fallback.</p>
 <p>unshackle decrypts HLS AES-128 ClearKey in-process and ignores this setting.</p>
+<p>mp4decrypt finds a content key by the KID in the first <code>sinf</code> box of the track. When that box
+has no CENC <code>tenc</code> (for example, a PIFF <code>sinf</code> before the CENC one), unshackle also gives
+mp4decrypt the content key of that KID by track ID. When mp4decrypt copies a track through
+still encrypted, unshackle decrypts it again with shaka-packager and logs a warning. This
+retry needs shaka-packager installed.</p>
 <div class="tabbed-set tabbed-alternate" data-tabs="1:2"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">Global</label><label for="__tabbed_1_2">Per-service</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
@@ -2405,7 +2416,8 @@ segment goes away. The output file is the same either way.</p>
 service (or as the default); with <code>shaka</code> the option has no effect, because shaka-packager
 cannot decrypt a segment without its init segment. It applies to DASH tracks and to HLS
 tracks that use one init segment, one <code>EXT-X-KEY</code> and no <code>EXT-X-DISCONTINUITY</code>. Every other
-track keeps the whole-file decryption.</p>
+track keeps the whole-file decryption, and so does a track whose init segment mp4decrypt
+cannot key by KID when no content key has that KID.</p>
 <div class="admonition note">
 <p class="admonition-title">No resume</p>
 <p>A track that decrypts segment by segment always downloads from the start.
@@ -2511,10 +2523,10 @@ is already decrypted.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

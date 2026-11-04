@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/favicon.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -2770,13 +2770,7 @@ Two kinds of members matter: <strong>class variables</strong> that give the deta
   line, and a REST download job shows it as the job's <code>notice</code>.</li>
 <li><strong>Event callbacks</strong>: <code>on_segment_downloaded</code>, <code>on_track_downloaded</code>,
   <code>on_track_decrypted</code>, <code>on_track_repacked</code>, <code>on_track_multiplex</code> let a service react to
-  pipeline events (for example, MonaLisa decrypts each segment in <code>on_segment_downloaded</code>).</li>
-<li><strong><code>resolve_server_keys(title)</code></strong>: an escape hatch for services whose decryption keys are
-  resolved server-side <em>ahead of</em> the normal per-track license flow. Unlike everything else
-  here it is <strong>not declared on the <code>Service</code> base class at all</strong>: <code>dl.py</code> probes for it with
-  <code>hasattr</code> and calls it (once, after track selection) only if your service defines it. Use
-  it when your service must fetch or inject keys in bulk before download, separate from
-  the per-track license callbacks below.</li>
+  pipeline events.</li>
 </ul>
 <h3 id="what-__init__-wires-up-for-you">What <code>__init__</code> wires up for you<a class="headerlink" href="#what-__init__-wires-up-for-you" title="Permanent link">&para;</a></h3>
 <p>You rarely override <code>__init__</code>. The base constructor takes the Click context and sets
@@ -2791,7 +2785,7 @@ up the objects your methods rely on:</p>
 <tbody>
 <tr>
 <td><code>self.config</code></td>
-<td>The per-service config slice (see <a href="#request-and-http-session-objects">Request and HTTP session objects</a>).</td>
+<td>The merged service config (see <a href="#request-and-http-session-objects">Request and HTTP session objects</a>).</td>
 </tr>
 <tr>
 <td><code>self.log</code></td>
@@ -3004,7 +2998,7 @@ do not give a <code>name</code>, unshackle derives a human-readable name from th
 <p><code>Video</code> adds <code>codec</code>, <code>range</code>, <code>bitrate</code>, <code>width</code>, <code>height</code>, <code>fps</code>, <code>scan_type</code>, and
 closed-caption descriptors. The relevant enums:</p>
 <ul>
-<li><strong><code>Video.Codec</code></strong>: <code>AVC</code> (H.264), <code>HEVC</code> (H.265), <code>VC1</code>, <code>VP8</code>, <code>VP9</code>, <code>AV1</code>.</li>
+<li><strong><code>Video.Codec</code></strong>: <code>AVC</code> (H.264), <code>HEVC</code> (H.265), <code>VC1</code>, <code>VP8</code>, <code>VP9</code>, <code>AV1</code>, <code>LCEVC</code>.</li>
 <li><strong><code>Video.Range</code></strong>: <code>SDR</code>, <code>HLG</code>, <code>HDR10</code>, <code>HDR10P</code> (HDR10+), <code>DV</code> (Dolby Vision), and
   <code>HYBRID</code>. <code>HYBRID</code> is special: it tells the pipeline to select both an HDR10(+) base and
   a DV track and merge the DV RPU onto the HDR10 track with <code>dovi_tool</code> (see
@@ -3018,7 +3012,7 @@ string form displays kb/s, and <code>--vbitrate</code> and <code>--abitrate</cod
 <h3 id="audio"><code>Audio</code><a class="headerlink" href="#audio" title="Permanent link">&para;</a></h3>
 <p><code>Audio</code> adds <code>bitrate</code>, <code>channels</code>, <code>joc</code> (Joint Object Coding, the Atmos indicator),
 and <code>descriptive</code>. <code>Audio.Codec</code> covers <code>AAC</code>, <code>AC3</code> (<code>DD</code>), <code>EC3</code> (<code>DD+</code>), <code>AC4</code>,
-<code>OPUS</code>, <code>OGG</code> (Vorbis), <code>DTS</code>, <code>DTSX</code>, <code>ALAC</code>, and <code>FLAC</code>. The <code>atmos</code> property is <code>True</code> when
+<code>OPUS</code>, <code>OGG</code> (Vorbis), <code>DTS</code>, <code>DTSX</code>, <code>DTSHD</code>, <code>MPEGH</code>, <code>ALAC</code>, <code>FLAC</code>, and <code>MP3</code>. The <code>atmos</code> property is <code>True</code> when
 <code>joc</code> is set (or when <code>extra</code> flags it).</p>
 <h3 id="subtitle"><code>Subtitle</code><a class="headerlink" href="#subtitle" title="Permanent link">&para;</a></h3>
 <p><code>Subtitle</code> adds three mutually-constrained flags: <code>cc</code> (closed captions), <code>sdh</code>
@@ -3036,7 +3030,9 @@ all documented for users in <a href="../../guide/subtitles/">Subtitles</a>.</p>
 <li><strong><code>Chapters</code></strong>: a sorted collection that auto-inserts a <code>00:00:00.000</code> chapter and
   reads/writes OGM Simple format.</li>
 <li><strong><code>Attachment</code></strong>: a font or image attached to the mux (for example, fonts an ASS subtitle
-  references), built from a local <code>path</code> or a <code>url</code>.</li>
+  references), built from a local <code>path</code> or a <code>url</code>. A <code>url</code> attachment downloads through
+  the same downloader as a track, with the same retries. If it still fails, <code>dl</code> stops the
+  run with a one-line error.</li>
 </ul>
 <h3 id="selection-sorting-and-muxing">Selection, sorting, and muxing<a class="headerlink" href="#selection-sorting-and-muxing" title="Permanent link">&para;</a></h3>
 <p><code>Tracks</code> is also the selection engine the <code>dl</code> command uses. It offers
@@ -3120,7 +3116,7 @@ because HLS variants carry no language.</p>
 </ul>
 <h2 id="drm-hooks">DRM hooks<a class="headerlink" href="#drm-hooks" title="Permanent link">&para;</a></h2>
 <p>If a track carries DRM, the framework licenses and decrypts it, but it needs your
-service to talk to the platform's license server. unshackle recognizes five DRM systems:</p>
+service to talk to the platform's license server. unshackle recognizes six DRM systems:</p>
 <table>
 <thead>
 <tr>
@@ -3154,6 +3150,11 @@ service to talk to the platform's license server. unshackle recognizes five DRM 
 <td><code>MonaLisa</code></td>
 <td>Proprietary WASM DRM</td>
 <td>keys extracted locally; no license server</td>
+</tr>
+<tr>
+<td><code>BlowfishStripe</code></td>
+<td>Blowfish CBC stripe cipher</td>
+<td>the service gives the per-track key; no CDM, no license server</td>
 </tr>
 </tbody>
 </table>
@@ -3232,6 +3233,7 @@ the API surface.</p>
 <p>Two DV mechanisms sit on top of the track model. <strong>DV fixup</strong> re-exposes DV signalling on
 HLS and DASH streams that carry a valid DV RPU but advertise plain HEVC, with DV only in the
 supplemental codecs (<code>dv_compatible_bitstream</code>). <code>--list</code> shows such a track as <code>HDR10+DV</code> or <code>HDR10P+DV</code>.
+A service sets <code>hdr10_base</code> on a DV track that has an HDR10 base layer (DV profile 8.1), and <code>--list</code> shows it as <code>DV+HDR10</code>.
 <strong>Hybrid</strong> processing (<code>Video.Range.HYBRID</code>) selects an HDR10(+) base and a DV donor,
 extracts the RPU with <code>dovi_tool</code>, and injects it onto the base layer, to make a single
 track that carries both HDR10 metadata and the DV RPU. Both are automatic once the
@@ -3244,10 +3246,11 @@ the container file.</p>
 <p>Everything a service does over the network flows through objects the base constructor
 prepared, all derived from the Click context (<code>ctx</code>) that <code>dl</code> passes in.</p>
 <ul>
-<li><strong><code>self.config</code></strong>: your service's slice of <code>unshackle.yaml</code>, i.e.
-  <code>config.services[&lt;ServiceName&gt;]</code>. This is a plain dict. Use it for per-service settings
-  like base URLs, an API key, or a <code>title_map</code>. See
-  <a href="../../getting-started/configuration-file/">Configuration</a>.</li>
+<li><strong><code>self.config</code></strong>: a plain dict. unshackle loads the service's own <code>config.yaml</code>, then merges
+  the user's <code>services.&lt;TAG&gt;</code> block from <code>unshackle.yaml</code> over it. Nested keys merge one by one,
+  the user's value wins, and a list in the user's block replaces the whole list. Use it for
+  per-service settings like base URLs, an API key, or a <code>title_map</code>. See
+  <a href="../../reference/configuration/services/">Services &amp; authentication</a> for the override keys.</li>
 <li><strong><code>self.session</code></strong>: a <code>requests.Session</code> with <code>config.headers</code> applied, a retry policy
   (<code>total=5</code>, backoff, retry on 429/5xx), and any resolved proxy already mounted. Pass this
   HTTP session into the manifest parsers and DRM calls so headers, cookies, and proxies flow
@@ -3407,10 +3410,10 @@ service tag. Put your service in one of the <code>directories.services</code> pa
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

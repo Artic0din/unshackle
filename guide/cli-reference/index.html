@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/favicon.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -3042,7 +3042,7 @@
 <tr>
 <td><code>-a</code>, <code>--acodec</code></td>
 <td>any</td>
-<td>Audio codec(s), comma-separated. Accepts <code>AAC</code>, <code>AC3</code>/<code>DD</code>, <code>EC3</code>/<code>DD+</code>/<code>eac3</code>/<code>ddp</code>, <code>AC4</code>/<code>AC-4</code>, <code>OPUS</code>, <code>OGG</code>/<code>VORB</code>/<code>vorbis</code>, <code>DTS</code>, <code>DTSX</code>/<code>DTS-X</code>, <code>ALAC</code>, <code>FLAC</code>.</td>
+<td>Audio codec(s), comma-separated. Accepts <code>AAC</code>, <code>AC3</code>/<code>DD</code>, <code>EC3</code>/<code>DD+</code>/<code>eac3</code>/<code>ddp</code>, <code>AC4</code>/<code>AC-4</code>, <code>OPUS</code>, <code>OGG</code>/<code>VORB</code>/<code>vorbis</code>, <code>DTS</code>, <code>DTSX</code>/<code>DTS-X</code>, <code>ALAC</code>, <code>FLAC</code>, <code>MP3</code>.</td>
 </tr>
 <tr>
 <td><code>-vb</code>, <code>--vbitrate</code></td>
@@ -3587,7 +3587,7 @@ and keeps the service's numbering unchanged. Pick an order that covers the whole
 </div>
 <hr />
 <h2 id="import"><code>import</code><a class="headerlink" href="#import" title="Permanent link">&para;</a></h2>
-<p>Reconstruct a download (download → decrypt → mux) from an <code>--export</code> JSON file without re-contacting the service. It re-fetches the manifest, injects the stored keys, and then runs the normal <code>dl</code> pipeline. The service tag is read from the export file, not passed by you.</p>
+<p>Reconstruct a download (download → decrypt → mux) from an <code>--export</code> JSON file without re-contacting the service. It uses the DASH or ISM manifest that the export saved, or fetches the manifest again when the export has none. It injects the stored keys and then runs the normal <code>dl</code> pipeline. The service tag is read from the export file, not passed by you.</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>unshackle import EXPORT_FILE [DL_ARGS...]
 </span></code></pre></div>
 <p>unshackle forwards any <code>dl</code> options after the file verbatim, so you can override quality, range, proxy, and so on.</p>
@@ -3665,7 +3665,7 @@ through the tunnel. It stops at the first step that fails.</p>
 </table>
 <div class="admonition warning">
 <p class="admonition-title">Comments are stripped</p>
-<p>Writing a value through <code>cfg</code> rewrites the configuration file and <strong>removes all comments</strong> from it. If your config relies on comments, edit it by hand instead. Setting a value and using <code>--unset</code> together is an error.</p>
+<p>Writing a value through <code>cfg</code> rewrites the configuration file and <strong>removes all comments</strong> from it. If your config relies on comments, edit it by hand instead. Setting a value and using <code>--unset</code> together is an error. If a config key is set twice in the same block, every command warns with the line numbers of the two copies and uses the later copy. <code>cfg</code> stops without a change.</p>
 </div>
 <div class="admonition example">
 <p class="admonition-title">Example</p>
@@ -3683,9 +3683,23 @@ through the tunnel. It stops at the first step that fails.</p>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>unshackle env COMMAND [ARGS]...
 </span></code></pre></div>
 <h3 id="env-check"><code>env check</code><a class="headerlink" href="#env-check" title="Permanent link">&para;</a></h3>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>unshackle env check
+<div class="language-text highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>unshackle env check [--verbose]
 </span></code></pre></div>
-<p>Prints a dependency table (Category / Tool / Status / Required / Purpose) that shows which external tools unshackle finds on your <code>PATH</code>. It also gives a summary of how many required tools are present. If a required tool is missing, it tells you to run <a href="#setup"><code>unshackle setup</code></a>.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--verbose</code></td>
+<td>Adds a Path column with the file that unshackle loads for each tool. Use it to find a tool that you want to replace.</td>
+</tr>
+</tbody>
+</table>
+<p>Prints a dependency table (Category / Tool / Status / Version / Required / Purpose) that shows which external tools unshackle finds on your <code>PATH</code> and the version that each one reports. The version is <code>-</code> when a tool does not report one. It also gives a summary of how many required tools are present. If a required tool is missing, it tells you to run <a href="#setup"><code>unshackle setup</code></a>.</p>
 <table>
 <thead>
 <tr>
@@ -3766,6 +3780,7 @@ through the tunnel. It stops at the first step that fails.</p>
 </span></code></pre></div>
 <h3 id="kv-copy-to_vault-from_vault"><code>kv copy TO_VAULT FROM_VAULT...</code><a class="headerlink" href="#kv-copy-to_vault-from_vault" title="Permanent link">&para;</a></h3>
 <p>Copy content keys from one or more source vaults into a destination vault. unshackle skips rows whose KIDs match, unless the existing row has no content key. unshackle never alters or deletes existing data.</p>
+<p>A vault argument is the name of a vault in the config, or the path to an SQLite vault file. Use a path to import a vault file that is not in the config.</p>
 <table>
 <thead>
 <tr>
@@ -3818,10 +3833,11 @@ through the tunnel. It stops at the first step that fails.</p>
 <p class="admonition-title">Example</p>
 <div class="language-shell highlight"><pre><span></span><code><span id="__span-18-1"><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>copy<span class="w"> </span>main<span class="w"> </span>backup1<span class="w"> </span>backup2
 </span><span id="__span-18-2"><a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>copy<span class="w"> </span>main<span class="w"> </span>backup<span class="w"> </span>-s<span class="w"> </span>EXAMPLE
-</span><span id="__span-18-3"><a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>sync<span class="w"> </span>main<span class="w"> </span>mysql_vault
-</span><span id="__span-18-4"><a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>add<span class="w"> </span>keys.txt<span class="w"> </span>EXAMPLE<span class="w"> </span>main<span class="w"> </span>backup
-</span><span id="__span-18-5"><a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>search<span class="w"> </span>0123456789abcdef0123456789abcdef<span class="w"> </span>-s<span class="w"> </span>EXAMPLE<span class="w"> </span>-v<span class="w"> </span>main
-</span><span id="__span-18-6"><a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>prepare<span class="w"> </span>main<span class="w"> </span>mysql_vault
+</span><span id="__span-18-3"><a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>copy<span class="w"> </span>main<span class="w"> </span>~/Downloads/key_store.db<span class="w"> </span>-s<span class="w"> </span>EXAMPLE
+</span><span id="__span-18-4"><a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>sync<span class="w"> </span>main<span class="w"> </span>mysql_vault
+</span><span id="__span-18-5"><a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>add<span class="w"> </span>keys.txt<span class="w"> </span>EXAMPLE<span class="w"> </span>main<span class="w"> </span>backup
+</span><span id="__span-18-6"><a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>search<span class="w"> </span>0123456789abcdef0123456789abcdef<span class="w"> </span>-s<span class="w"> </span>EXAMPLE<span class="w"> </span>-v<span class="w"> </span>main
+</span><span id="__span-18-7"><a id="__codelineno-18-7" name="__codelineno-18-7" href="#__codelineno-18-7"></a>unshackle<span class="w"> </span>kv<span class="w"> </span>prepare<span class="w"> </span>main<span class="w"> </span>mysql_vault
 </span></code></pre></div>
 </div>
 <hr />
@@ -4023,7 +4039,7 @@ through the tunnel. It stops at the first step that fails.</p>
 </tr>
 </tbody>
 </table>
-<p>WVD files in the WVDs directory and PRD files in the PRDs directory are auto-loaded. The REST API lives under <code>http://&lt;host&gt;:&lt;port&gt;/api/</code>, with Swagger UI at <code>/api/docs/</code> and a health check at <code>/api/health</code> (exempt from auth).</p>
+<p>WVD files in the WVDs directory and PRD files in the PRDs directory are auto-loaded. The REST API lives under <code>http://&lt;host&gt;:&lt;port&gt;/api/</code>, with Swagger UI at <code>/api/docs/</code> and a health check at <code>/api/health</code>.</p>
 <div class="admonition warning">
 <p class="admonition-title">Configure <code>api_secret</code> first</p>
 <p>Unless you pass <code>--no-key</code>, <code>serve.api_secret</code> must be set in your config. Requests authenticate with the <code>X-Secret-Key</code> header. <code>--no-key</code> disables authentication entirely. Only use it on a trusted, private network.</p>
@@ -4236,10 +4252,10 @@ through the tunnel. It stops at the first step that fails.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

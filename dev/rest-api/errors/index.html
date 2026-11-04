@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../../assets/favicon.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -2525,12 +2525,12 @@ while the server restarts.</p>
 <tr>
 <td><code>SERVER_DRAINING</code></td>
 <td>409</td>
-<td>The server is about to restart and starts no new remote session or download job. Open work continues. Retryable after the restart.</td>
+<td>The server is about to restart and starts no new remote session or download job. Open work continues. Retryable after the restart. A <code>dl --remote</code> client waits for the restart and opens a new remote session.</td>
 </tr>
 <tr>
 <td><code>SERVICE_ERROR</code></td>
 <td>422</td>
-<td>The streaming service's API returned an error, or the service does not support the requested operation.</td>
+<td>The streaming service's API returned an error, or the service does not support the requested operation, or the service code exited (<code>sys.exit</code>).</td>
 </tr>
 <tr>
 <td><code>DRM_ERROR</code></td>
@@ -2698,8 +2698,7 @@ body that uses an integer <code>status</code> and no <code>error_code</code> or 
 <p class="admonition-title">Handle both shapes</p>
 <p>A client must expect two error formats: the standard structured error
 (string <code>status</code> of <code>"error"</code>, with <code>error_code</code>), and this authentication error
-(integer <code>status</code>, no <code>error_code</code>). The <code>GET /api/health</code> endpoint is exempt
-from authentication, so it never returns the key-error shape.</p>
+(integer <code>status</code>, no <code>error_code</code>).</p>
 </div>
 <h2 id="late-failures-with-status-200">Late failures with status <code>200</code><a class="headerlink" href="#late-failures-with-status-200" title="Permanent link">&para;</a></h2>
 <p>The remote session <code>titles</code>, <code>tracks</code> and <code>license</code> routes send status <code>200</code> and the headers
@@ -2864,10 +2863,10 @@ handling.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

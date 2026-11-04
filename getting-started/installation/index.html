@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/favicon.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -2703,7 +2703,7 @@ download. For example, <code>dovi_tool</code> only matters if you download Dolby
 <tr>
 <td>MP4Box (GPAC)</td>
 <td><code>MP4Box</code></td>
-<td>Muxing DTS:X Profile 2 (DTS-UHD) audio</td>
+<td>Muxing DTS:X Profile 2 (DTS-UHD) and MPEG-H audio</td>
 </tr>
 <tr>
 <td>dovi_tool</td>
@@ -2758,8 +2758,8 @@ download. For example, <code>dovi_tool</code> only matters if you download Dolby
 </tbody>
 </table>
 <div class="admonition info">
-<p class="admonition-title">MP4Box is only used for DTS:X Profile 2</p>
-<p>Titles with DTS:X Profile 2 (DTS-UHD) audio mux to MP4; everything else muxes to MKV
+<p class="admonition-title">MP4Box is only used for DTS:X Profile 2 and MPEG-H</p>
+<p>Titles with DTS:X Profile 2 (DTS-UHD) or MPEG-H audio mux to MP4; everything else muxes to MKV
 with <code>mkvmerge</code>. Install with <code>apt install gpac</code>.</p>
 </div>
 <div class="admonition tip">
@@ -2788,7 +2788,8 @@ reports which tools it found:</p>
 </div>
 <p>It prints a table grouped by category (Core, DRM, HDR, Subtitle, Player,
 Network) with a status column: a green check for tools that resolved and a red
-cross for those it could not find, plus a summary line such as
+cross for those it could not find. A version column shows the version that each
+tool reports, or <code>-</code> when it reports none. It ends with a summary line such as
 <code>All required tools installed ✓</code> or <code>Missing required: &lt;names&gt;</code>.</p>
 <p>If a required tool shows as missing, <code>env check</code> tells you to run
 <code>unshackle setup</code>. You can also install the tool by hand and put it on your
@@ -2909,10 +2910,10 @@ searches for one, so you know where to make it. See the
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.annotate", "content.code.copy", "content.tabs.link", "content.tooltips", "navigation.footer", "navigation.indexes", "navigation.sections", "navigation.tabs", "navigation.top", "navigation.tracking", "search.highlight", "search.share", "search.suggest", "toc.follow"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>
