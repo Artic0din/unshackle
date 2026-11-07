@@ -573,6 +573,7 @@ debug_requests: true
 ## See also
 
 - [Downloading](downloading.md): the `dl` command and its DRM-related flags.
+- [Platform DRM Requirements](platform-drm-requirements.md): community-reported CDM levels per streaming service.
 - [Key vaults](vaults.md): caching content keys across downloads.
 - [Configuration](../reference/configuration/index.md): the full `unshackle.yaml` reference.
 - [Dependencies](../getting-started/installation.md): installing shaka-packager and mp4decrypt.

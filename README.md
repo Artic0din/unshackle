@@ -56,6 +56,23 @@ Optional:
 - [dovi_tool](https://github.com/quietvoid/dovi_tool) - ≥ 2.1
 - [SubtitleEdit](https://github.com/SubtitleEdit/subtitleedit/releases) - ≥ 5.0 (`SeConv` CLI)
 
+## Platform DRM requirements
+
+Which CDM a title needs depends on the service **and the endpoint**: the same
+brand may give SD to a browser CDM, FHD to Widevine L3, and UHD only to
+Widevine L1 or PlayReady SL3000. What is known about the services unshackle
+currently ships adapters for — verified ceilings plus community reports
+(July–November 2026, unverified and subject to change) — is collected in
+[Platform DRM Requirements](docs/guide/platform-drm-requirements.md).
+
+The one current service with community DRM reports so far is Prime Video
+(`AMZN`): the web player is reported to top out at 1080p SDR with Widevine
+L3, a real Android L3 device was reported to receive FHD across endpoints,
+and no L1/SL3000 path to UHD has been confirmed — the web manifest, not the
+license, appears to be the cap. Before concluding any service needs a
+stronger device, check whether the manifest or the endpoint's device
+expectations are what actually limit quality.
+
 ## License
 
 [GPL-3.0](LICENSE). Do not use unshackle for content you do not have the rights to. Keep the core free and open. Keep service code private. Be kind.

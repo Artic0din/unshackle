@@ -116,6 +116,7 @@ nav:
       - Downloading: guide/downloading.md
       - CLI Reference: guide/cli-reference.md
       - DRM & CDM Setup: guide/drm-and-cdm.md
+      - Platform DRM Requirements: guide/platform-drm-requirements.md
       - Proxies & VPN: guide/proxies-and-vpn.md
       - Key Vaults: guide/vaults.md
       - Output & Naming: guide/output-and-naming.md
