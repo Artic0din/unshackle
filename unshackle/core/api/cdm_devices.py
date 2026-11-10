@@ -302,22 +302,23 @@ def reprovision_playready(path: Path) -> dict[str, Any]:
         tail = f".backup-{stamp}{f'-{counter}' if counter is not None else ''}.bak"
         return f"{truncate_to_bytes(path.stem, NAME_MAX - len(tail))}{tail}"
 
-    tmp: Path | None = None
-    replaced = False
-    backup: Path | None = None
-    try:
+    def open_backup() -> tuple[Path, int]:
+        """An exclusively-created 0600 backup file and its name; probes same-second collisions."""
         counter: int | None = None
         while True:
             candidate = path.with_name(backup_name(counter))
             try:
                 # born 0600 and exclusively ours: no permissive copy2 window, no clobbering
-                fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                return candidate, os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             except FileExistsError:  # a same-second reprovision never eats the first backup
                 counter = 1 if counter is None else counter + 1
-                continue
-            backup = candidate
-            break
-        with os.fdopen(fd, "wb") as dst, path.open("rb") as src:
+
+    tmp: Path | None = None
+    replaced = False
+    backup: Path | None = None
+    try:
+        backup, backup_fd = open_backup()
+        with os.fdopen(backup_fd, "wb") as dst, path.open("rb") as src:
             shutil.copyfileobj(src, dst)
         shutil.copystat(path, backup)  # then the original's exact mode and timestamps
         device.group_certificate.remove(0)
@@ -337,9 +338,11 @@ def reprovision_playready(path: Path) -> dict[str, Any]:
         device.group_certificate.verify_chain(check_expiry=True, cert_type=BCertCertType.DEVICE)
         # mkstemp: a unique file born 0600, then the original's exact mode; never the umask's 0644.
         # The prefix is stem-truncated so a long device name cannot top the filename limit.
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{truncate_to_bytes(path.stem, 80)}.", suffix=".tmp", dir=path.parent)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{truncate_to_bytes(path.stem, 80)}.", suffix=".tmp", dir=path.parent
+        )
         tmp = Path(tmp_name)
-        with os.fdopen(fd, "wb") as f:
+        with os.fdopen(tmp_fd, "wb") as f:
             f.write(device.dumps())
         os.chmod(tmp, path.stat().st_mode & 0o777)
         os.replace(tmp, path)
