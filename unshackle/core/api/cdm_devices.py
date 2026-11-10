@@ -13,7 +13,6 @@ import base64
 import json
 import logging
 import os
-import re
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -41,12 +40,11 @@ from pywidevine.device import DeviceTypes
 from pywidevine.pssh import PSSH as WidevinePSSH
 
 from unshackle.core.api.errors import APIError, APIErrorCode
-from unshackle.core.api.handlers import require_admin, server_cdm_allowed
+from unshackle.core.api.handlers import request_secret_key, require_admin, server_cdm_allowed
 from unshackle.core.config import config
 
 log = logging.getLogger(__name__)
 
-DEVICE_NAME = re.compile(r"[A-Za-z0-9][\w.@ -]{0,150}")
 KINDS = ("widevine", "playready")
 TEST_TIMEOUT = 30  # seconds; a vendor test server answering at all is quick
 TEST_SLOTS = asyncio.Semaphore(4)  # tests wait on a vendor: bound the executor threads they hold
@@ -87,14 +85,30 @@ PLAYREADY_REVOKED_MARKERS = ("device certificate revoked", "0x8004c065")
 
 
 def device_path(kind: str, name: str) -> Path:
-    """The device file a kind and name resolve to, or NOT_FOUND. Names are never paths."""
-    if not DEVICE_NAME.fullmatch(name or "") or "/" in name or "\\" in name:
+    """The device file a kind and name resolve to, or NOT_FOUND. Names never leave the folder."""
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
         raise APIError(APIErrorCode.INVALID_INPUT, f"Not a usable device name: {name!r}")
     folder = config.directories.wvds if kind == "widevine" else config.directories.prds
     path = folder / f"{name}{'.prd' if kind == 'playready' else '.wvd'}"
+    if path.resolve().parent != folder.resolve():
+        raise APIError(APIErrorCode.INVALID_INPUT, f"Not a usable device name: {name!r}")
     if not path.is_file():
         raise APIError(APIErrorCode.NOT_FOUND, f"No {kind} device called {name!r}")
     return path
+
+
+def device_scope_allows(request: web.Request, kind: str, name: str) -> bool:
+    """Whether the calling key's ``devices``/``playready_devices`` allowlist covers ``name``.
+
+    An unlisted key (the admin secret, or any caller in no-key mode) has every device. A listed
+    key is scoped to its allowlist for the kind, and like the download flow a listed key
+    without one has none of that kind's devices.
+    """
+    user = ((config.serve or {}).get("users") or {}).get(request_secret_key(request))
+    if not isinstance(user, dict):
+        return True
+    allowed = user.get("devices" if kind == "widevine" else "playready_devices")
+    return isinstance(allowed, (list, tuple)) and name in allowed
 
 
 def describe_widevine(path: Path) -> dict[str, Any]:
@@ -158,8 +172,8 @@ def list_devices() -> dict[str, Any]:
         if not folder.is_dir():
             continue
         for path in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
-            # only files the other routes can resolve back by name: exact suffix, a valid device name
-            if path.is_file() and path.suffix == suffix and DEVICE_NAME.fullmatch(path.stem):
+            # exact suffix: what serve itself globs, and no recovery copies (.bak)
+            if path.is_file() and path.suffix == suffix:
                 devices.append(describe(path))
     return {"devices": devices}
 
@@ -255,10 +269,11 @@ def reprovision_playready(path: Path) -> dict[str, Any]:
         raise APIError(APIErrorCode.INVALID_INPUT, f"{path.stem} is not provisioned")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    backup = path.with_name(f"{path.stem}.backup-{stamp}{path.suffix}")
+    # .bak, not the device suffix: a backup must stay out of every .wvd/.prd discovery glob
+    backup = path.with_name(f"{path.stem}.backup-{stamp}.bak")
     counter = 1
     while backup.exists():  # a second reprovision in the same second never eats the first backup
-        backup = path.with_name(f"{path.stem}.backup-{stamp}-{counter}{path.suffix}")
+        backup = path.with_name(f"{path.stem}.backup-{stamp}-{counter}.bak")
         counter += 1
     shutil.copy2(path, backup)  # copy2 keeps the original's restrictive permissions
     tmp: Path | None = None
@@ -351,7 +366,9 @@ async def test_cdm_device(request: web.Request) -> web.Response:
       '400':
         description: Missing or unusable kind or name
       '403':
-        description: The API key has no server_cdm grant
+        description: >-
+          The API key has no server_cdm grant, or its device allowlist does not cover
+          the named device
       '404':
         description: No such device
     """
@@ -366,6 +383,11 @@ async def test_cdm_device(request: web.Request) -> web.Response:
     kind, name = str(body.get("kind") or "").lower(), str(body.get("name") or "")
     if kind not in KINDS:
         raise APIError(APIErrorCode.INVALID_INPUT, "kind must be widevine or playready")
+    if not device_scope_allows(request, kind, name):
+        raise APIError(
+            APIErrorCode.FORBIDDEN,
+            f"This API key's {kind} device allowlist does not cover {name!r}",
+        )
     path = device_path(kind, name)
     run = test_widevine if kind == "widevine" else test_playready
     try:
@@ -387,8 +409,9 @@ async def reprovision_cdm_device(request: web.Request) -> web.Response:
     summary: Reprovision a PlayReady device
     description: >-
       Create a new leaf certificate and fresh encryption/signing keys for the named PlayReady
-      device from its group key. The previous file is kept next to it as a .backup-<timestamp>
-      copy, whose name is returned. Only devices with a group key (version 3) can be
+      device from its group key. The previous file is kept next to it as a
+      .backup-<timestamp>.bak copy, whose name is returned; the .bak suffix keeps recovery
+      copies out of device discovery. Only devices with a group key (version 3) can be
       reprovisioned. Replaces a device's credentials, so it needs the admin grant, not just
       server_cdm.
     requestBody:
