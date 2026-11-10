@@ -20,6 +20,11 @@ from unshackle.core.api.errors import (
     categorize_exception,
     handle_api_exception,
 )
+from unshackle.core.api.cdm_devices import (
+    list_cdm_devices,
+    reprovision_cdm_device,
+    test_cdm_device,
+)
 from unshackle.core.api.handlers import (
     CORS_HEADERS,
     DASHBOARD_EVENTS_ROUTE,
@@ -3393,6 +3398,9 @@ ROUTES: list[tuple[str, str, Handler, bool]] = [
     ("POST", "/api/maintenance/clear-temp", maintenance_clear_temp, False),
     ("POST", "/api/maintenance/refresh-services", maintenance_refresh_services, False),
     ("GET", "/api/env/check", env_check, False),
+    ("GET", "/api/cdm/devices", list_cdm_devices, False),
+    ("POST", "/api/cdm/devices/test", test_cdm_device, False),
+    ("POST", "/api/cdm/devices/reprovision", reprovision_cdm_device, False),
     ("GET", "/api/remote/logins", remote_logins, False),
     ("POST", "/api/remote/logins/{login_id}/input", remote_login_input, False),
     ("POST", "/api/session/create", session_create, True),
