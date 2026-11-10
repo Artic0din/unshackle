@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
@@ -40,7 +41,7 @@ from pywidevine.device import DeviceTypes
 from pywidevine.pssh import PSSH as WidevinePSSH
 
 from unshackle.core.api.errors import APIError, APIErrorCode
-from unshackle.core.api.handlers import server_cdm_allowed
+from unshackle.core.api.handlers import require_admin, server_cdm_allowed
 from unshackle.core.config import config
 
 log = logging.getLogger(__name__)
@@ -48,6 +49,8 @@ log = logging.getLogger(__name__)
 DEVICE_NAME = re.compile(r"[A-Za-z0-9][\w.@ -]{0,150}")
 KINDS = ("widevine", "playready")
 TEST_TIMEOUT = 30  # seconds; a vendor test server answering at all is quick
+TEST_SLOTS = asyncio.Semaphore(4)  # tests wait on a vendor: bound the executor threads they hold
+REPROVISION_LOCK = asyncio.Lock()  # rare and quick, but two at once would fight over the same files
 
 # Google's own Widevine test endpoint, the same one its Shaka packager tests against. A license
 # from it means the certificate is good; 127/175 mean revoked. The request envelope is signed
@@ -106,7 +109,8 @@ def describe_widevine(path: Path) -> dict[str, Any]:
             "system_id": device.system_id,
             "level": f"L{device.security_level}",
             "type": {DeviceTypes.CHROME: "Chrome", DeviceTypes.ANDROID: "Android"}.get(device.type, str(device.type)),
-            "vmp": bool(device.vmp),
+            # the FileHashes message exists even when empty; its payload is what matters (as `wvd parse` reads it)
+            "vmp": bool(device.client_id.vmp_data) if device.client_id is not None else False,
         }
         for key, field in (
             ("company_name", "company"),
@@ -154,7 +158,8 @@ def list_devices() -> dict[str, Any]:
         if not folder.is_dir():
             continue
         for path in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
-            if path.is_file() and path.suffix.lower() == suffix:
+            # only files the other routes can resolve back by name: exact suffix, a valid device name
+            if path.is_file() and path.suffix == suffix and DEVICE_NAME.fullmatch(path.stem):
                 devices.append(describe(path))
     return {"devices": devices}
 
@@ -251,7 +256,13 @@ def reprovision_playready(path: Path) -> dict[str, Any]:
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     backup = path.with_name(f"{path.stem}.backup-{stamp}{path.suffix}")
-    shutil.copy2(path, backup)
+    counter = 1
+    while backup.exists():  # a second reprovision in the same second never eats the first backup
+        backup = path.with_name(f"{path.stem}.backup-{stamp}-{counter}{path.suffix}")
+        counter += 1
+    shutil.copy2(path, backup)  # copy2 keeps the original's restrictive permissions
+    tmp: Path | None = None
+    replaced = False
     try:
         device.group_certificate.remove(0)
         device.encryption_key = ECCKey.generate()
@@ -268,14 +279,24 @@ def reprovision_playready(path: Path) -> dict[str, Any]:
             )
         )
         device.group_certificate.verify_chain(check_expiry=True, cert_type=BCertCertType.DEVICE)
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        tmp.write_bytes(device.dumps())
+        # mkstemp: a unique file born 0600, then the original's exact mode; never the umask's 0644
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        tmp = Path(tmp_name)
+        with os.fdopen(fd, "wb") as f:
+            f.write(device.dumps())
+        os.chmod(tmp, path.stat().st_mode & 0o777)
         os.replace(tmp, path)
+        replaced = True
     except (OutdatedDevice, InvalidCertificateChain) as e:
+        backup.unlink(missing_ok=True)  # the original is untouched: its backup is pointless
         raise APIError(APIErrorCode.DRM_ERROR, f"Reprovision failed, the file is untouched: {e}")
     except Exception:
-        backup.unlink(missing_ok=True)
+        if not replaced:  # a replace that happened must keep its recovery copy
+            backup.unlink(missing_ok=True)
         raise
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
     return {"backup": backup.name, "device": describe_playready(path)}
 
 
@@ -340,13 +361,16 @@ async def test_cdm_device(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         raise APIError(APIErrorCode.INVALID_INPUT, "Invalid JSON body")
+    if not isinstance(body, dict):
+        raise APIError(APIErrorCode.INVALID_INPUT, "Expected a JSON object body")
     kind, name = str(body.get("kind") or "").lower(), str(body.get("name") or "")
     if kind not in KINDS:
         raise APIError(APIErrorCode.INVALID_INPUT, "kind must be widevine or playready")
     path = device_path(kind, name)
     run = test_widevine if kind == "widevine" else test_playready
     try:
-        return web.json_response(await asyncio.to_thread(run, path))
+        async with TEST_SLOTS:  # each running test holds an executor thread on a vendor round-trip
+            return web.json_response(await asyncio.to_thread(run, path))
     except requests.RequestException as e:
         return web.json_response({"ok": False, "error": f"Test server unreachable: {e}"})
     except APIError:
@@ -365,7 +389,8 @@ async def reprovision_cdm_device(request: web.Request) -> web.Response:
       Create a new leaf certificate and fresh encryption/signing keys for the named PlayReady
       device from its group key. The previous file is kept next to it as a .backup-<timestamp>
       copy, whose name is returned. Only devices with a group key (version 3) can be
-      reprovisioned. Needs the server_cdm grant.
+      reprovisioned. Replaces a device's credentials, so it needs the admin grant, not just
+      server_cdm.
     requestBody:
       required: true
       content:
@@ -387,12 +412,14 @@ async def reprovision_cdm_device(request: web.Request) -> web.Response:
       '404':
         description: No such PlayReady device
     """
-    if not server_cdm_allowed(request):
-        raise APIError(APIErrorCode.FORBIDDEN, "This API key may not reprovision the server's CDM devices")
+    require_admin(request)  # replaces a device's credentials: a server_cdm grant alone is not enough
     try:
         body = await request.json()
     except Exception:
         raise APIError(APIErrorCode.INVALID_INPUT, "Invalid JSON body")
+    if not isinstance(body, dict):
+        raise APIError(APIErrorCode.INVALID_INPUT, "Expected a JSON object body")
     name = str(body.get("name") or "")
     path = device_path("playready", name)
-    return web.json_response(await asyncio.to_thread(reprovision_playready, path))
+    async with REPROVISION_LOCK:  # two at once would share backup names and a temp file
+        return web.json_response(await asyncio.to_thread(reprovision_playready, path))
