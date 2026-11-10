@@ -108,6 +108,21 @@ def device_path(kind: str, name: str) -> Path:
     return path
 
 
+def truncate_to_bytes(name: str, byte_budget: int) -> str:
+    """As much of ``name`` as fits ``byte_budget`` filesystem bytes, cut only between characters."""
+    if len(os.fsencode(name)) <= byte_budget:
+        return name
+    out: list[str] = []
+    used = 0
+    for ch in name:
+        need = len(os.fsencode(ch))
+        if used + need > byte_budget:
+            break
+        out.append(ch)
+        used += need
+    return "".join(out)
+
+
 def device_scope_allows(request: web.Request, kind: str, name: str) -> bool:
     """Whether the calling key's ``devices``/``playready_devices`` allowlist covers ``name``.
 
@@ -285,18 +300,26 @@ def reprovision_playready(path: Path) -> dict[str, Any]:
     def backup_name(counter: int | None = None) -> str:
         """The recovery copy's name, stem-truncated so it never tops the filename limit."""
         tail = f".backup-{stamp}{f'-{counter}' if counter is not None else ''}.bak"
-        stem = os.fsdecode(os.fsencode(path.stem)[: NAME_MAX - len(tail)])
-        return f"{stem}{tail}"
+        return f"{truncate_to_bytes(path.stem, NAME_MAX - len(tail))}{tail}"
 
-    backup = path.with_name(backup_name())
-    counter = 1
-    while backup.exists():  # a second reprovision in the same second never eats the first backup
-        backup = path.with_name(backup_name(counter))
-        counter += 1
-    shutil.copy2(path, backup)  # copy2 keeps the original's restrictive permissions
     tmp: Path | None = None
     replaced = False
+    backup: Path | None = None
     try:
+        counter: int | None = None
+        while True:
+            candidate = path.with_name(backup_name(counter))
+            try:
+                # born 0600 and exclusively ours: no permissive copy2 window, no clobbering
+                fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:  # a same-second reprovision never eats the first backup
+                counter = 1 if counter is None else counter + 1
+                continue
+            backup = candidate
+            break
+        with os.fdopen(fd, "wb") as dst, path.open("rb") as src:
+            shutil.copyfileobj(src, dst)
+        shutil.copystat(path, backup)  # then the original's exact mode and timestamps
         device.group_certificate.remove(0)
         device.encryption_key = ECCKey.generate()
         device.signing_key = ECCKey.generate()
@@ -314,8 +337,7 @@ def reprovision_playready(path: Path) -> dict[str, Any]:
         device.group_certificate.verify_chain(check_expiry=True, cert_type=BCertCertType.DEVICE)
         # mkstemp: a unique file born 0600, then the original's exact mode; never the umask's 0644.
         # The prefix is stem-truncated so a long device name cannot top the filename limit.
-        short_stem = os.fsdecode(os.fsencode(path.stem)[:80])
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{short_stem}.", suffix=".tmp", dir=path.parent)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{truncate_to_bytes(path.stem, 80)}.", suffix=".tmp", dir=path.parent)
         tmp = Path(tmp_name)
         with os.fdopen(fd, "wb") as f:
             f.write(device.dumps())
@@ -323,15 +345,17 @@ def reprovision_playready(path: Path) -> dict[str, Any]:
         os.replace(tmp, path)
         replaced = True
     except (OutdatedDevice, InvalidCertificateChain) as e:
-        backup.unlink(missing_ok=True)  # the original is untouched: its backup is pointless
+        if backup is not None:
+            backup.unlink(missing_ok=True)  # the original is untouched: its backup is pointless
         raise APIError(APIErrorCode.DRM_ERROR, f"Reprovision failed, the file is untouched: {e}")
     except Exception:
-        if not replaced:  # a replace that happened must keep its recovery copy
+        if backup is not None and not replaced:  # a replace that happened must keep its recovery copy
             backup.unlink(missing_ok=True)
         raise
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)
+    assert backup is not None  # the try block always sets it before reaching here
     return {"backup": backup.name, "device": describe_playready(path)}
 
 
