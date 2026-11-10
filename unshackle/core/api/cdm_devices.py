@@ -46,6 +46,7 @@ from unshackle.core.config import config
 log = logging.getLogger(__name__)
 
 KINDS = ("widevine", "playready")
+NAME_MAX = 255  # bytes: the per-component filename limit on ext4, APFS and NTFS
 TEST_TIMEOUT = 30  # seconds; a vendor test server answering at all is quick
 TEST_SLOTS = asyncio.Semaphore(4)  # tests wait on a vendor: bound the executor threads they hold
 REPROVISION_LOCK = asyncio.Lock()  # rare and quick, but two at once would fight over the same files
@@ -86,14 +87,24 @@ PLAYREADY_REVOKED_MARKERS = ("device certificate revoked", "0x8004c065")
 
 def device_path(kind: str, name: str) -> Path:
     """The device file a kind and name resolve to, or NOT_FOUND. Names never leave the folder."""
-    if not name or name in (".", "..") or "/" in name or "\\" in name:
+    suffix = ".prd" if kind == "playready" else ".wvd"
+    if not name or name in (".", "..") or "/" in name or "\\" in name or "\x00" in name:
         raise APIError(APIErrorCode.INVALID_INPUT, f"Not a usable device name: {name!r}")
+    try:
+        oversized = len(os.fsencode(f"{name}{suffix}")) > NAME_MAX
+    except UnicodeEncodeError:  # lone surrogates are not a filesystem name
+        raise APIError(APIErrorCode.INVALID_INPUT, f"Not a usable device name: {name!r}") from None
+    if oversized:
+        raise APIError(APIErrorCode.INVALID_INPUT, f"Device name is too long: {name!r}")
     folder = config.directories.wvds if kind == "widevine" else config.directories.prds
-    path = folder / f"{name}{'.prd' if kind == 'playready' else '.wvd'}"
-    if path.resolve().parent != folder.resolve():
-        raise APIError(APIErrorCode.INVALID_INPUT, f"Not a usable device name: {name!r}")
-    if not path.is_file():
-        raise APIError(APIErrorCode.NOT_FOUND, f"No {kind} device called {name!r}")
+    path = folder / f"{name}{suffix}"
+    try:
+        if path.resolve().parent != folder.resolve():
+            raise APIError(APIErrorCode.INVALID_INPUT, f"Not a usable device name: {name!r}")
+        if not path.is_file():
+            raise APIError(APIErrorCode.NOT_FOUND, f"No {kind} device called {name!r}")
+    except (OSError, ValueError):
+        raise APIError(APIErrorCode.INVALID_INPUT, f"Not a usable device name: {name!r}") from None
     return path
 
 
@@ -269,11 +280,18 @@ def reprovision_playready(path: Path) -> dict[str, Any]:
         raise APIError(APIErrorCode.INVALID_INPUT, f"{path.stem} is not provisioned")
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
     # .bak, not the device suffix: a backup must stay out of every .wvd/.prd discovery glob
-    backup = path.with_name(f"{path.stem}.backup-{stamp}.bak")
+    def backup_name(counter: int | None = None) -> str:
+        """The recovery copy's name, stem-truncated so it never tops the filename limit."""
+        tail = f".backup-{stamp}{f'-{counter}' if counter is not None else ''}.bak"
+        stem = os.fsdecode(os.fsencode(path.stem)[: NAME_MAX - len(tail)])
+        return f"{stem}{tail}"
+
+    backup = path.with_name(backup_name())
     counter = 1
     while backup.exists():  # a second reprovision in the same second never eats the first backup
-        backup = path.with_name(f"{path.stem}.backup-{stamp}-{counter}.bak")
+        backup = path.with_name(backup_name(counter))
         counter += 1
     shutil.copy2(path, backup)  # copy2 keeps the original's restrictive permissions
     tmp: Path | None = None
@@ -294,8 +312,10 @@ def reprovision_playready(path: Path) -> dict[str, Any]:
             )
         )
         device.group_certificate.verify_chain(check_expiry=True, cert_type=BCertCertType.DEVICE)
-        # mkstemp: a unique file born 0600, then the original's exact mode; never the umask's 0644
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        # mkstemp: a unique file born 0600, then the original's exact mode; never the umask's 0644.
+        # The prefix is stem-truncated so a long device name cannot top the filename limit.
+        short_stem = os.fsdecode(os.fsencode(path.stem)[:80])
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{short_stem}.", suffix=".tmp", dir=path.parent)
         tmp = Path(tmp_name)
         with os.fdopen(fd, "wb") as f:
             f.write(device.dumps())
