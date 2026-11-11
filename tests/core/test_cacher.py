@@ -103,9 +103,7 @@ def test_entry_without_expires_at_reads_its_local_expiration(cache: Cacher) -> N
     assert abs(legacy.expiration - (datetime.now() + timedelta(seconds=300))) < CLOSE
 
 
-def test_concurrent_writes_leave_a_readable_cache(
-    cache: Cacher, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_concurrent_writes_leave_a_readable_cache(cache: Cacher, monkeypatch: pytest.MonkeyPatch) -> None:
     target = cache.get("key").path
     original_open = Path.open
     both_open = Barrier(2)
