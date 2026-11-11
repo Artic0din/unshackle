@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from pathlib import PureWindowsPath
-from typing import Optional
+from typing import Any, Optional
 
 MAX_CACHE_KEY_DEPTH = 8
 MAX_CACHE_PAYLOAD_DEPTH = 64
@@ -61,14 +62,19 @@ def safe_cache_payload(text: str) -> bool:
         root = json.loads(text)
     except (ValueError, RecursionError):
         return False
-    stack = [(root, 0)]
+    stack: list[tuple[Iterator[Any], int]] = [(iter((root,)), 1)]
     while stack:
-        node, depth = stack.pop()
+        values, depth = stack[-1]
+        try:
+            node = next(values)
+        except StopIteration:
+            stack.pop()
+            continue
         if depth > MAX_CACHE_PAYLOAD_DEPTH:
             return False
         child_depth = depth + 1
         if isinstance(node, list):
-            stack.extend((value, child_depth) for value in node)
+            stack.append((iter(node), child_depth))
         elif isinstance(node, dict):
             for key, value in node.items():
                 if key.startswith("py/") and key not in SAFE_PICKLE_TAGS:
@@ -79,5 +85,5 @@ def safe_cache_payload(text: str) -> bool:
                     isinstance(value, list) and value and isinstance(value[0], dict) and value[0].keys() == {"py/type"}
                 ):
                     return False
-                stack.append((value, child_depth))
+            stack.append((iter(node.values()), child_depth))
     return True
