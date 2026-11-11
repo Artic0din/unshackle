@@ -30,7 +30,7 @@ from unshackle.core.constants import DOWNLOAD_ALL_DRM, DOWNLOAD_CANCELLED, DOWNL
 from unshackle.core.downloaders.requests import parse_content_range
 from unshackle.core.drm import DRM_T, ClearKeyCENC, PlayReady, Widevine
 from unshackle.core.drm.segment_decrypt import SEGMENT_DRM_T, SegmentDecrypter, can_use
-from unshackle.core.drm.verify import decrypt_track
+from unshackle.core.drm.verify import decrypt_track, has_encrypted_entry
 from unshackle.core.events import events
 from unshackle.core.session import RnetSession
 from unshackle.core.tracks import Audio, DownloadContext, Subtitle, Tracks, Video, resume
@@ -40,7 +40,7 @@ from unshackle.core.tracks.track import (
     assert_fragments_decrypted,
     parse_sidx,
 )
-from unshackle.core.utilities import is_close_match, log_event, try_ensure_utf8
+from unshackle.core.utilities import get_boxes, is_close_match, log_event, try_ensure_utf8
 from unshackle.core.utils import run_proxy
 from unshackle.core.utils.bitrate import ranged_get
 from unshackle.core.utils.redact import safe_display_url
@@ -509,6 +509,9 @@ class DASH:
         segment_timescale: float = 0
         init_data: Optional[bytes] = None
         track_kid: Optional[UUID] = None
+        check_later_encryption = False
+        first_period_encrypted = False
+        later_period_encrypted = False
 
         content_periods = [p for p in all_periods if DASH.is_content_period(p, filtered_period_ids)]
         period_count = len(content_periods)
@@ -541,6 +544,7 @@ class DASH:
                 track_url=track.url,
                 session=session,
                 probe_kid=period_idx == 0,
+                probe_init=period_idx > 0 and check_later_encryption,
                 window=config.sample,
             )
 
@@ -549,6 +553,14 @@ class DASH:
                 init_data = p_init
                 track_kid = p_kid
                 segment_timescale = p_timescale
+                first_period_encrypted = bool(
+                    p_init and (has_encrypted_entry(p_init) or next(get_boxes(p_init, b"tenc"), None))
+                )
+                check_later_encryption = bool(
+                    not track.drm and not first_period_encrypted and p_init and next(get_boxes(p_init, b"pssh"), None)
+                )
+            elif p_init:
+                later_period_encrypted |= bool(has_encrypted_entry(p_init) or next(get_boxes(p_init, b"tenc"), None))
 
             for seg in p_segments:
                 if seg not in seen_segments:
@@ -575,23 +587,28 @@ class DASH:
         elif DOWNLOAD_ALL_DRM.is_set() and init_data and binaries.FFProbe and isinstance(track, (Video, Audio)):
             track.add_init_drm(init_data, cdm)
         elif not track.drm and init_data and isinstance(track, (Video, Audio)):
-            prefers_playready = track.prefers_playready(cdm)
-            if prefers_playready:
-                try:
-                    track.drm = [PlayReady.from_init_data(init_data)]
-                except PlayReady.Exceptions.PSSHNotFound:
-                    try:
-                        track.drm = [Widevine.from_init_data(init_data)]
-                    except Widevine.Exceptions.PSSHNotFound:
-                        log.debug("No PlayReady or Widevine PSSH was found for this track, is it DRM free?")
-            else:
-                try:
-                    track.drm = [Widevine.from_init_data(init_data)]
-                except Widevine.Exceptions.PSSHNotFound:
+            try:
+                prefers_playready = track.prefers_playready(cdm)
+                if prefers_playready:
                     try:
                         track.drm = [PlayReady.from_init_data(init_data)]
                     except PlayReady.Exceptions.PSSHNotFound:
-                        log.debug("No Widevine or PlayReady PSSH was found for this track, is it DRM free?")
+                        try:
+                            track.drm = [Widevine.from_init_data(init_data)]
+                        except Widevine.Exceptions.PSSHNotFound:
+                            log.debug("No PlayReady or Widevine PSSH was found for this track, is it DRM free?")
+                else:
+                    try:
+                        track.drm = [Widevine.from_init_data(init_data)]
+                    except Widevine.Exceptions.PSSHNotFound:
+                        try:
+                            track.drm = [PlayReady.from_init_data(init_data)]
+                        except PlayReady.Exceptions.PSSHNotFound:
+                            log.debug("No Widevine or PlayReady PSSH was found for this track, is it DRM free?")
+            except (Widevine.Exceptions.KIDNotFound, PlayReady.Exceptions.KIDNotFound):
+                if first_period_encrypted or later_period_encrypted:
+                    raise
+                log.debug("Ignoring a KID-less PSSH on a clear track.")
 
         if track.drm:
             track_kid = track_kid or track.get_key_id(url=segments[0][0], session=session)
@@ -982,6 +999,7 @@ class DASH:
         track_url: str,
         session: Union[Session, RnetSession],
         probe_kid: bool = True,
+        probe_init: bool = False,
         window: Optional[tuple[int, int]] = None,
     ) -> tuple[
         Optional[bytes],
@@ -998,6 +1016,7 @@ class DASH:
                 the caller needs neither the init data nor the Key ID of this period. False
                 drops the FFprobe call, and also the init request where the rest of the parse
                 does not need those bytes.
+            probe_init: Fetch the initialization segment without probing its Key ID.
 
         Returns:
             A tuple of (init_data, segments, segment_timescale, segment_durations, track_kid).
@@ -1046,7 +1065,7 @@ class DASH:
                 segment_template.set(item, value)
 
             init_url = segment_template.get("initialization")
-            if init_url and probe_kid:
+            if init_url and (probe_kid or probe_init):
                 res = session.get(
                     DASH.replace_fields(
                         init_url, Bandwidth=representation.get("bandwidth"), RepresentationID=representation.get("id")
@@ -1054,7 +1073,8 @@ class DASH:
                 )
                 res.raise_for_status()
                 init_data = res.content
-                track_kid = track.get_key_id(init_data)
+                if probe_kid:
+                    track_kid = track.get_key_id(init_data)
 
             if segment_timeline is not None:
                 # an S with @p takes its durations from a Pattern, cycling from index @pE
@@ -1143,7 +1163,7 @@ class DASH:
 
             init_data = None
             initialization = segment_list.find("Initialization")
-            if initialization is not None and probe_kid:
+            if initialization is not None and (probe_kid or probe_init):
                 source_url = initialization.get("sourceURL")
                 if not source_url:
                     source_url = rep_base_url
@@ -1158,7 +1178,8 @@ class DASH:
                 res = session.get(url=source_url, headers=init_range_header)
                 res.raise_for_status()
                 init_data = res.content
-                track_kid = track.get_key_id(init_data)
+                if probe_kid:
+                    track_kid = track.get_key_id(init_data)
 
             segment_urls = segment_list.findall("SegmentURL")
             list_duration = float(segment_list.get("duration") or 0)
