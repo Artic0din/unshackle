@@ -5,6 +5,7 @@ import zlib
 from datetime import datetime
 from os import stat_result
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Optional, Union
 
 import jsonpickle
@@ -107,8 +108,17 @@ class Cacher:
         }
         payload["crc32"] = zlib.crc32(jsonpickle.dumps(payload).encode("utf8"))
 
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(jsonpickle.dumps(payload))
+        path = self.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Optional[Path] = None
+        try:
+            with NamedTemporaryFile("w", encoding="utf8", dir=path.parent, delete=False) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(jsonpickle.dumps(payload))
+            temporary_path.replace(path)
+        finally:
+            if temporary_path:
+                temporary_path.unlink(missing_ok=True)
 
         return self.data
 
