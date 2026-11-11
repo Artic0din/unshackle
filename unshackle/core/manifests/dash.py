@@ -30,7 +30,7 @@ from unshackle.core.constants import DOWNLOAD_ALL_DRM, DOWNLOAD_CANCELLED, DOWNL
 from unshackle.core.downloaders.requests import parse_content_range
 from unshackle.core.drm import DRM_T, ClearKeyCENC, PlayReady, Widevine
 from unshackle.core.drm.segment_decrypt import SEGMENT_DRM_T, SegmentDecrypter, can_use
-from unshackle.core.drm.verify import decrypt_track
+from unshackle.core.drm.verify import decrypt_track, has_encrypted_entry
 from unshackle.core.events import events
 from unshackle.core.session import RnetSession
 from unshackle.core.tracks import Audio, DownloadContext, Subtitle, Tracks, Video, resume
@@ -40,7 +40,7 @@ from unshackle.core.tracks.track import (
     assert_fragments_decrypted,
     parse_sidx,
 )
-from unshackle.core.utilities import is_close_match, log_event, try_ensure_utf8
+from unshackle.core.utilities import get_boxes, is_close_match, log_event, try_ensure_utf8
 from unshackle.core.utils import run_proxy
 from unshackle.core.utils.bitrate import ranged_get
 from unshackle.core.utils.redact import safe_display_url
@@ -575,23 +575,28 @@ class DASH:
         elif DOWNLOAD_ALL_DRM.is_set() and init_data and binaries.FFProbe and isinstance(track, (Video, Audio)):
             track.add_init_drm(init_data, cdm)
         elif not track.drm and init_data and isinstance(track, (Video, Audio)):
-            prefers_playready = track.prefers_playready(cdm)
-            if prefers_playready:
-                try:
-                    track.drm = [PlayReady.from_init_data(init_data)]
-                except PlayReady.Exceptions.PSSHNotFound:
-                    try:
-                        track.drm = [Widevine.from_init_data(init_data)]
-                    except Widevine.Exceptions.PSSHNotFound:
-                        log.debug("No PlayReady or Widevine PSSH was found for this track, is it DRM free?")
-            else:
-                try:
-                    track.drm = [Widevine.from_init_data(init_data)]
-                except Widevine.Exceptions.PSSHNotFound:
+            try:
+                prefers_playready = track.prefers_playready(cdm)
+                if prefers_playready:
                     try:
                         track.drm = [PlayReady.from_init_data(init_data)]
                     except PlayReady.Exceptions.PSSHNotFound:
-                        log.debug("No Widevine or PlayReady PSSH was found for this track, is it DRM free?")
+                        try:
+                            track.drm = [Widevine.from_init_data(init_data)]
+                        except Widevine.Exceptions.PSSHNotFound:
+                            log.debug("No PlayReady or Widevine PSSH was found for this track, is it DRM free?")
+                else:
+                    try:
+                        track.drm = [Widevine.from_init_data(init_data)]
+                    except Widevine.Exceptions.PSSHNotFound:
+                        try:
+                            track.drm = [PlayReady.from_init_data(init_data)]
+                        except PlayReady.Exceptions.PSSHNotFound:
+                            log.debug("No Widevine or PlayReady PSSH was found for this track, is it DRM free?")
+            except (Widevine.Exceptions.KIDNotFound, PlayReady.Exceptions.KIDNotFound):
+                if has_encrypted_entry(init_data) or next(get_boxes(init_data, b"tenc"), None):
+                    raise
+                log.debug("Ignoring a KID-less PSSH on a clear track.")
 
         if track.drm:
             track_kid = track_kid or track.get_key_id(url=segments[0][0], session=session)
