@@ -1,6 +1,9 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier, Event
+from typing import Any
 
 import jsonpickle
 import jwt
@@ -98,3 +101,50 @@ def test_entry_without_expires_at_reads_its_local_expiration(cache: Cacher) -> N
     legacy = cache.get("key")
     assert not legacy.expired
     assert abs(legacy.expiration - (datetime.now() + timedelta(seconds=300))) < CLOSE
+
+
+def test_concurrent_writes_leave_a_readable_cache(
+    cache: Cacher, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = cache.get("key").path
+    original_open = Path.open
+    both_open = Barrier(2)
+    long_write_finished = Event()
+
+    class CoordinatedWriter:
+        def __init__(self, handle: Any) -> None:
+            self.handle = handle
+
+        def __enter__(self) -> "CoordinatedWriter":
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> object:
+            return self.handle.__exit__(*args)
+
+        def write(self, text: str) -> int:
+            both_open.wait(timeout=5)
+            if len(text) > 10_000:
+                written = self.handle.write(text)
+                self.handle.flush()
+                long_write_finished.set()
+                return written
+            assert long_write_finished.wait(timeout=5)
+            return self.handle.write(text)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.handle, name)
+
+    def coordinated_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        handle = original_open(path, *args, **kwargs)
+        mode = kwargs.get("mode", args[0] if args else "r")
+        if path == target and str(mode).startswith("w"):
+            return CoordinatedWriter(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", coordinated_open)
+    values = ({"value": "x" * 20_000}, {"value": "short"})
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda value: cache.get("key").set(value), values))
+
+    assert cache.get("key").data in values
