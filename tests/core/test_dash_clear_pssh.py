@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+import sys
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ import pytest
 from pywidevine.license_protocol_pb2 import WidevinePsshData
 from pywidevine.pssh import PSSH
 
+from unshackle.core import binaries
 from unshackle.core.constants import DOWNLOAD_LICENCE_ONLY
 from unshackle.core.drm import Widevine
 from unshackle.core.manifests import DASH
@@ -46,6 +48,7 @@ def tenc_without_kid() -> bytes:
 
 def download_with_init(init_data: bytes, tmp_path: Path, monkeypatch: Any) -> Audio:
     track = DASH.from_text(MPD, MANIFEST_URL).to_tracks().audio[0]
+    monkeypatch.setattr(binaries, "FFProbe", Path(sys.executable))
     monkeypatch.setattr(
         DASH,
         "get_period_segments",
