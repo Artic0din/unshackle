@@ -8,6 +8,7 @@ from pathlib import PureWindowsPath
 from typing import Optional
 
 MAX_CACHE_KEY_DEPTH = 8
+MAX_CACHE_PAYLOAD_DEPTH = 64
 MAX_SESSION_CACHE_KEYS = 64
 
 
@@ -60,11 +61,14 @@ def safe_cache_payload(text: str) -> bool:
         root = json.loads(text)
     except (ValueError, RecursionError):
         return False
-    stack = [root]
+    stack = [(root, 0)]
     while stack:
-        node = stack.pop()
+        node, depth = stack.pop()
+        if depth > MAX_CACHE_PAYLOAD_DEPTH:
+            return False
+        child_depth = depth + 1
         if isinstance(node, list):
-            stack.extend(node)
+            stack.extend((value, child_depth) for value in node)
         elif isinstance(node, dict):
             for key, value in node.items():
                 if key.startswith("py/") and key not in SAFE_PICKLE_TAGS:
@@ -75,5 +79,5 @@ def safe_cache_payload(text: str) -> bool:
                     isinstance(value, list) and value and isinstance(value[0], dict) and value[0].keys() == {"py/type"}
                 ):
                     return False
-                stack.append(value)
+                stack.append((value, child_depth))
     return True

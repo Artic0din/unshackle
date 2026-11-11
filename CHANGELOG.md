@@ -10,6 +10,7 @@ This changelog is automatically generated using [git-cliff](https://git-cliff.or
 
 ### Bug Fixes
 
+- *api*: Reject excessively nested peer cache payloads
 - *dash*: Ignore metadata-only DRM headers on clear tracks
 
 ## [6.0.0] - 2026-10-13
