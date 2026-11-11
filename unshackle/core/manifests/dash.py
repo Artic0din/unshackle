@@ -509,6 +509,9 @@ class DASH:
         segment_timescale: float = 0
         init_data: Optional[bytes] = None
         track_kid: Optional[UUID] = None
+        check_later_encryption = False
+        first_period_encrypted = False
+        later_period_encrypted = False
 
         content_periods = [p for p in all_periods if DASH.is_content_period(p, filtered_period_ids)]
         period_count = len(content_periods)
@@ -541,6 +544,7 @@ class DASH:
                 track_url=track.url,
                 session=session,
                 probe_kid=period_idx == 0,
+                probe_init=period_idx > 0 and check_later_encryption,
                 window=config.sample,
             )
 
@@ -549,6 +553,14 @@ class DASH:
                 init_data = p_init
                 track_kid = p_kid
                 segment_timescale = p_timescale
+                first_period_encrypted = bool(
+                    p_init and (has_encrypted_entry(p_init) or next(get_boxes(p_init, b"tenc"), None))
+                )
+                check_later_encryption = bool(
+                    not track.drm and not first_period_encrypted and p_init and next(get_boxes(p_init, b"pssh"), None)
+                )
+            elif p_init:
+                later_period_encrypted |= bool(has_encrypted_entry(p_init) or next(get_boxes(p_init, b"tenc"), None))
 
             for seg in p_segments:
                 if seg not in seen_segments:
@@ -594,7 +606,7 @@ class DASH:
                         except PlayReady.Exceptions.PSSHNotFound:
                             log.debug("No Widevine or PlayReady PSSH was found for this track, is it DRM free?")
             except (Widevine.Exceptions.KIDNotFound, PlayReady.Exceptions.KIDNotFound):
-                if has_encrypted_entry(init_data) or next(get_boxes(init_data, b"tenc"), None):
+                if first_period_encrypted or later_period_encrypted:
                     raise
                 log.debug("Ignoring a KID-less PSSH on a clear track.")
 
@@ -987,6 +999,7 @@ class DASH:
         track_url: str,
         session: Union[Session, RnetSession],
         probe_kid: bool = True,
+        probe_init: bool = False,
         window: Optional[tuple[int, int]] = None,
     ) -> tuple[
         Optional[bytes],
@@ -1003,6 +1016,7 @@ class DASH:
                 the caller needs neither the init data nor the Key ID of this period. False
                 drops the FFprobe call, and also the init request where the rest of the parse
                 does not need those bytes.
+            probe_init: Fetch the initialization segment without probing its Key ID.
 
         Returns:
             A tuple of (init_data, segments, segment_timescale, segment_durations, track_kid).
@@ -1051,7 +1065,7 @@ class DASH:
                 segment_template.set(item, value)
 
             init_url = segment_template.get("initialization")
-            if init_url and probe_kid:
+            if init_url and (probe_kid or probe_init):
                 res = session.get(
                     DASH.replace_fields(
                         init_url, Bandwidth=representation.get("bandwidth"), RepresentationID=representation.get("id")
@@ -1059,7 +1073,8 @@ class DASH:
                 )
                 res.raise_for_status()
                 init_data = res.content
-                track_kid = track.get_key_id(init_data)
+                if probe_kid:
+                    track_kid = track.get_key_id(init_data)
 
             if segment_timeline is not None:
                 # an S with @p takes its durations from a Pattern, cycling from index @pE
@@ -1148,7 +1163,7 @@ class DASH:
 
             init_data = None
             initialization = segment_list.find("Initialization")
-            if initialization is not None and probe_kid:
+            if initialization is not None and (probe_kid or probe_init):
                 source_url = initialization.get("sourceURL")
                 if not source_url:
                     source_url = rep_base_url
@@ -1163,7 +1178,8 @@ class DASH:
                 res = session.get(url=source_url, headers=init_range_header)
                 res.raise_for_status()
                 init_data = res.content
-                track_kid = track.get_key_id(init_data)
+                if probe_kid:
+                    track_kid = track.get_key_id(init_data)
 
             segment_urls = segment_list.findall("SegmentURL")
             list_duration = float(segment_list.get("duration") or 0)
