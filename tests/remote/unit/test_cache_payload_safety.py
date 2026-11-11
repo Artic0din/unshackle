@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from unshackle.core.api import handlers
+from unshackle.core.api import handlers, sanitize
 from unshackle.core.api.sanitize import safe_cache_payload
 from unshackle.core.cacher import Cacher
 from unshackle.core.config import config
@@ -42,6 +42,29 @@ def test_plain_json_is_safe(text) -> None:
 )
 def test_unsafe_payload_is_refused(text) -> None:
     assert safe_cache_payload(text) is False
+
+
+def test_unsafe_payload_refuses_deep_tree_after_json_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    root: list = []
+    for _ in range(100):
+        root = [root]
+    monkeypatch.setattr(sanitize.json, "loads", lambda _: root)
+
+    assert safe_cache_payload("[]") is False
+
+
+def test_cache_payload_depth_counts_the_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    at_limit: object = None
+    over_limit: object = None
+    for _ in range(63):
+        at_limit = [at_limit]
+    for _ in range(64):
+        over_limit = [over_limit]
+
+    monkeypatch.setattr(sanitize.json, "loads", lambda _: at_limit)
+    assert safe_cache_payload("null") is True
+    monkeypatch.setattr(sanitize.json, "loads", lambda _: over_limit)
+    assert safe_cache_payload("null") is False
 
 
 def save_returned(cache_map: dict) -> None:
