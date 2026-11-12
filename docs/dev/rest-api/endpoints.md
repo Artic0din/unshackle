@@ -131,7 +131,7 @@ Field notes:
 | `has_drm` | Whether the service overrides a Widevine or PlayReady license hook. |
 | `pending_update` | Set to `true` while a service repository refresh waits for this service's jobs to finish before it swaps in the new code. Absent otherwise. |
 | `server_accounts` | Present when the server lends its own accounts for this service: `{regions: ["ca", "gb"], global: bool}`, the regions those accounts cover. A client sends no credentials, cookies, or cache for such a service. |
-| `auth_methods` | Declared or inferred auth methods, e.g. `["cookies"]`, `["credentials"]`. |
+| `auth_methods` | Declared or inferred auth methods: `"cookies"`, `"credentials"`, and `"pairing"`. Pairing is declared explicitly by the service. |
 
 | Status | Meaning |
 | --- | --- |

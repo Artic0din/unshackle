@@ -99,7 +99,7 @@ Declared at class level to configure framework behaviour:
 | `GEOFENCE` | `tuple[str, ...]` | IP region codes the service requires. Empty = no geofence. unshackle treats the **first** entry as the main region for auto-proxy. |
 | `GEOBLOCK` | `tuple[str, ...]` | IP region codes where the service refuses to work. Every other region is allowed. Default `()`. |
 | `VAULT_TAG` | `Optional[str]` | Overrides the key-vault namespace so sibling services can share one vault. Default `None` (use the service's own tag). |
-| `AUTH_METHODS` | `Optional[tuple[str, ...]]` | Auth methods accepted (`"cookies"` / `"credentials"`). When `None`, the REST `/services` endpoint infers them from `authenticate()`. |
+| `AUTH_METHODS` | `Optional[tuple[AuthMethod, ...]]` | Auth methods accepted (`"cookies"`, `"credentials"`, or `"pairing"`). When `None`, the REST `/services` endpoint infers cookies or credentials from `authenticate()`. Pairing must be declared explicitly. |
 | `ANONYMOUS_SEARCH` | `bool` | Set `True` when `search()` needs no login and no state from `authenticate()`. A search then skips the cookie load, `authenticate()` and the cookie save. Default `False`. |
 | `NO_SUBTITLES` | `bool` | Set `True` on a service with no subtitle tracks to skip subtitle handling entirely. |
 | `ANIME` | `bool` | Set `True` when the catalogue is anime, so metadata lookups prefer AniList. A title's own `anime` flag overrides it. |

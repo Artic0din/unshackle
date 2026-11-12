@@ -65,7 +65,7 @@ Declared at the top of your service class, these are static descriptors:
 | `GEOFENCE` | `tuple[str, ...]` | ISO region codes the service requires; empty means no geofence. unshackle treats the first entry as the "main region" for automatic proxy selection. |
 | `GEOBLOCK` | `tuple[str, ...]` | ISO region codes where the service refuses to work; every other region is allowed. Use it for a service that works worldwide except in its home market. |
 | `VAULT_TAG` | `Optional[str]` | Overrides the key-vault namespace; defaults to the service's own tag. |
-| `AUTH_METHODS` | `Optional[tuple[str, ...]]` | Accepted auth methods (`"cookies"` / `"credentials"`). When `None`, the REST `/services` endpoint infers them from `authenticate()`. |
+| `AUTH_METHODS` | `Optional[tuple[AuthMethod, ...]]` | Accepted auth methods (`"cookies"`, `"credentials"`, or `"pairing"`). When `None`, the REST `/services` endpoint infers cookies or credentials from `authenticate()`. Pairing must be declared explicitly. |
 | `ANONYMOUS_SEARCH` | `bool` | `search()` needs no login and no state from `authenticate()`. A search then skips the cookie load, `authenticate()` and the cookie save. Default `False`. |
 | `ANIME` | `bool` | The catalogue is anime, so metadata lookups prefer AniList. A title's own `anime` flag overrides it. |
 | `DAILY` | `bool` | The catalogue is daily/date-based, so unshackle names episodes by air date. A title's own `daily` flag overrides it. |
