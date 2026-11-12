@@ -58,6 +58,19 @@ def collect_paths(app: web.Application) -> list[tuple[str, str]]:
     return sorted({(r.method, r.resource.canonical) for r in app.router.routes()})
 
 
+def test_service_details_reports_pairing_auth_method(monkeypatch: pytest.MonkeyPatch) -> None:
+    class PairedService:
+        AUTH_METHODS = ("pairing",)
+
+        def authenticate(self) -> None:
+            pass
+
+    monkeypatch.setattr(routes.Services, "load", lambda tag: PairedService)
+    monkeypatch.setattr(routes, "SERVICE_DETAILS", {})
+
+    assert routes.service_details("PAIRED")["auth_methods"] == ["pairing"]
+
+
 def test_setup_routes_full_mode_wires_all_endpoints(make_app) -> None:
     app = make_app(remote_only=False)
     paths = collect_paths(app)

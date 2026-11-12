@@ -5,7 +5,7 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Sequence, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, Sequence, TypeVar, Union
 
 if TYPE_CHECKING:
     from unshackle.core.api.input_bridge import InputBridge
@@ -49,6 +49,7 @@ from unshackle.core.utils.redact import mask_proxy
 # Default (connect, read) timeout for the requests path, mirroring RnetSession's
 # connect_timeout / read_timeout construction defaults. A per-request timeout= wins.
 DEFAULT_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
+AuthMethod = Literal["cookies", "credentials", "pairing"]
 
 
 class TimeoutSession(requests.Session):
@@ -164,9 +165,9 @@ class Service(metaclass=ABCMeta):
     ANONYMOUS_SEARCH: bool = False  # search() needs no login; a search then skips cookies and authenticate().
     # vault namespace override; when set, key vault read/write uses this tag instead of the service's own.
     VAULT_TAG: Optional[str] = None
-    # Auth methods the service accepts ("cookies"/"credentials"); when None the REST /services
+    # Auth methods the service accepts; when None the REST /services
     # endpoint infers them from authenticate().
-    AUTH_METHODS: Optional[tuple[str, ...]] = None
+    AUTH_METHODS: Optional[tuple[AuthMethod, ...]] = None
     # Config keys a remote client may supply for a session its own device licenses (a device identity
     # such as an ESN); the server's own values for these keys are withheld from that session.
     CLIENT_CONFIG: tuple[str, ...] = ()
