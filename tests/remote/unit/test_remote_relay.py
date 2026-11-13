@@ -380,6 +380,29 @@ def test_remote_login_preserves_its_session_bridges_terminal_result(monkeypatch,
     assert remote.auth_observation.state.value == terminal
 
 
+def test_reopening_a_session_clears_its_previous_authentication_result():
+    from threading import Event
+    from types import SimpleNamespace
+
+    from unshackle.core.api.input_bridge import InputBridge
+    from unshackle.core.authentication import AuthenticationObservation, AuthenticationState
+
+    bridge = InputBridge()
+    previous = AuthenticationObservation(AuthenticationState.AUTHENTICATED, method="pairing")
+    bridge.set_authentication_observation(previous)
+    remote = object.__new__(remote_service.RemoteService)
+    remote._server_cdm = remote._server_device = remote._server_vault = False
+    remote._keepalive_stop, remote._session_id = Event(), "old-session"
+    remote.client = SimpleNamespace(tunnel=None)
+    remote._log_seq, remote._segment_filters = 4, {"track": object()}
+    remote.auth_observation, remote._input_bridge = previous, bridge
+    remote.wait_for_server = lambda accepting: False
+
+    assert remote.reopen() is False
+    assert remote.auth_observation is None
+    assert bridge.get_authentication_observation() is None
+
+
 def test_headless_remote_login_routes_approval_through_its_session_bridge(monkeypatch):
     import logging
     from threading import Lock

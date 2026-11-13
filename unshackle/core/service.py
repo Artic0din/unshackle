@@ -19,7 +19,7 @@ from rich.padding import Padding
 from rich.rule import Rule
 
 from unshackle.core.approval import ApprovalNotice
-from unshackle.core.authentication import AuthenticationObservation, AuthMethod
+from unshackle.core.authentication import AuthenticationObservation, AuthenticationState, AuthMethod
 from unshackle.core.cacher import Cacher
 from unshackle.core.config import config
 from unshackle.core.console import console, prompt_user, publish_authentication, show_approval
@@ -507,6 +507,9 @@ class Service(metaclass=ABCMeta):
                 if result is not None:
                     return result
                 if time.monotonic() + interval >= deadline:
+                    self.observe_authentication(
+                        AuthenticationObservation(AuthenticationState.TIMED_OUT, method="pairing")
+                    )
                     raise TimeoutError(f"No approval within {timeout:.0f}s")
                 time.sleep(interval)
         finally:

@@ -11,7 +11,9 @@ from unshackle.core.service import Service
 
 
 def _service(bridge=None):
-    return SimpleNamespace(log=logging.getLogger("test"), _input_bridge=bridge)
+    service = SimpleNamespace(log=logging.getLogger("test"), _input_bridge=bridge)
+    service.observe_authentication = lambda observation: Service.observe_authentication(service, observation)
+    return service
 
 
 @pytest.fixture(autouse=True)
@@ -25,8 +27,12 @@ def test_returns_the_first_value_check_gives():
 
 
 def test_times_out_when_check_never_gives_a_value():
+    bridge = InputBridge()
     with pytest.raises(TimeoutError):
-        Service.wait_for_approval(_service(), "enter code", lambda: None, timeout=0.05, interval=0.01)
+        Service.wait_for_approval(_service(bridge), "enter code", lambda: None, timeout=0.05, interval=0.01)
+    observation = bridge.get_authentication_observation()
+    assert observation is not None
+    assert observation.to_dict() == {"state": "timed_out", "method": "pairing"}
 
 
 def test_stops_when_the_remote_session_is_cancelled():

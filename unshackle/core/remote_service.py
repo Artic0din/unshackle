@@ -1481,6 +1481,7 @@ class RemoteService:
         grants = (self._server_cdm, self._server_device, self._server_vault)
         self._keepalive_stop.set()
         self._session_id = None
+        self.set_authentication_observation(None)
         if self.client.tunnel:  # the server forgot the tunnel too
             self.client.tunnel.stop()
             self.client.tunnel = None
@@ -1614,7 +1615,7 @@ class RemoteService:
     def set_authentication_observation(self, observation: Optional[AuthenticationObservation]) -> None:
         """Relay one redacted server observation to this login's owning session or job."""
         self.auth_observation = observation
-        if self._input_bridge is not None:
+        if getattr(self, "_input_bridge", None) is not None:
             self._input_bridge.set_authentication_observation(observation)
         else:
             publish_authentication(observation)
