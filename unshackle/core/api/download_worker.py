@@ -163,9 +163,10 @@ def main(argv: list[str]) -> int:
         )
 
         def parent_closed() -> None:
-            if job_temp_dir is not None:
-                shutil.rmtree(job_temp_dir, ignore_errors=True)
-            os._exit(1)
+            with progress_lock:
+                if job_temp_dir is not None:
+                    shutil.rmtree(job_temp_dir, ignore_errors=True)
+                os._exit(1)
 
         relay_prompts(progress_callback, on_parent_close=parent_closed)
         output_files = perform_download(job_id, service, title_id, params, progress_callback=progress_callback)
