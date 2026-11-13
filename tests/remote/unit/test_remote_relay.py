@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from unshackle.core import remote_service
-from unshackle.core.approval import ApprovalNotice
 from unshackle.core.api import handlers
 from unshackle.core.api.errors import APIError, APIErrorCode
+from unshackle.core.approval import ApprovalNotice
 from unshackle.core.config import config
 
 SERVICES = [

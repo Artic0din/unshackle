@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from unshackle.core.approval import ApprovalNotice
 from unshackle.core.api.input_bridge import AuthStatus, InputBridge
+from unshackle.core.approval import ApprovalNotice
 
 pytestmark = pytest.mark.unit
 

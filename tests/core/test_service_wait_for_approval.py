@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from unshackle.core import console
-from unshackle.core.approval import ApprovalNotice
 from unshackle.core.api.input_bridge import NO_USER_MESSAGE, InputBridge, NoUserBridge
+from unshackle.core.approval import ApprovalNotice
 from unshackle.core.service import Service
 
 
