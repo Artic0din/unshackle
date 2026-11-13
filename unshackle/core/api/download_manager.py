@@ -17,6 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
 
+from unshackle.core.approval import ApprovalNotice
 from unshackle.core.api.events import bus, publish_service_event
 from unshackle.core.api.sanitize import sanitize_log
 from unshackle.core.utils.redact import REDACTED, URL_USERINFO_RE, redact_all, redact_path, redact_text
@@ -133,6 +134,8 @@ class DownloadJob:
     input_prompt: Optional[str] = None
     # Message a service shows through show_notice() while it waits for an approval; needs no answer.
     notice: Optional[str] = None
+    # Device approval visible only while this job owns it; never written to job history.
+    approval: Optional[ApprovalNotice] = None
 
     # Subtitles skipped under skip_subtitle_errors (non-fatal). Each entry is a dl.SkippedSubtitle
     # dict (id / language / title) so a client can report which weren't available.
@@ -170,6 +173,7 @@ class DownloadJob:
             "skipped_subtitles": self.skipped_subtitles,
             "input_prompt": self.input_prompt,
             "notice": self.notice,
+            "approval": self.approval.to_dict() if self.approval is not None else None,
         }
 
         if include_full_details:
@@ -627,7 +631,7 @@ class DownloadQueueManager:
     def publish(self, job: DownloadJob, event: str) -> None:
         """Fan an event carrying the job's full detail dict out to every listener."""
         data = job.to_dict(include_full_details=True)
-        bus.publish("job", {"event": event, **data})
+        bus.publish("job", {"event": event, **data}, retain=job.approval is None)
         queues = self._subscribers.get(job.job_id)
         if not queues:
             return
@@ -1004,6 +1008,9 @@ class DownloadQueueManager:
                                 job.input_prompt = progress_data["input_prompt"]
                             if "notice" in progress_data:
                                 job.notice = progress_data["notice"]
+                            if "approval" in progress_data:
+                                raw_approval = progress_data["approval"]
+                                job.approval = ApprovalNotice.from_dict(raw_approval) if raw_approval else None
                             if progress_data.get("skipped_subtitles"):
                                 job.skipped_subtitles = progress_data["skipped_subtitles"]
                             if "progress" in progress_data:
@@ -1091,6 +1098,7 @@ class DownloadQueueManager:
             self._download_processes.pop(job.job_id, None)
             job.input_prompt = None
             job.notice = None
+            job.approval = None
 
             temp_paths = self._job_temp_files.pop(job.job_id, {})
             for path in temp_paths.values():

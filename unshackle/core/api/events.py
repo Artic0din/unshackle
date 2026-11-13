@@ -40,16 +40,17 @@ class EventBus:
         """
         return [item for item in self.history.copy() if item["seq"] > seq]
 
-    def publish(self, event: str, data: Dict[str, Any]) -> None:
-        """Record and fan out one event; safe to call from any thread.
+    def publish(self, event: str, data: Dict[str, Any], *, retain: bool = True) -> None:
+        """Fan out one event and optionally retain it for replay; safe to call from any thread.
 
         The lock is re-entrant because a log call inside it publishes again. ``seq``
-        moves only after the append, so a reader that sees it also finds the event in history.
+        moves only after a retained append or a transient event is ready for subscribers.
         """
         with self._lock:
             seq = self.seq + 1
             item = {"seq": seq, "event": event, "data": data}
-            self.history.append(item)
+            if retain:
+                self.history.append(item)
             self.seq = seq
         if not self._subs:
             return

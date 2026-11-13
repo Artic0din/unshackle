@@ -53,6 +53,27 @@ def test_to_dict_short_vs_full(manager: DownloadQueueManager) -> None:
     assert "output_files" in full
 
 
+def test_terminal_history_never_persists_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manager: DownloadQueueManager
+) -> None:
+    import json
+
+    from unshackle.core.api import download_manager
+    from unshackle.core.approval import ApprovalNotice
+
+    history = tmp_path / "history.jsonl"
+    monkeypatch.setattr(download_manager, "history_path", lambda: history)
+    job = manager.create_job("EXAMPLE", "t")
+    job.approval = ApprovalNotice("Enter pair code ABCD")
+    job.status = JobStatus.COMPLETED
+
+    download_manager.record_job_history(job)
+
+    saved = json.loads(history.read_text(encoding="utf-8"))
+    assert "approval" not in saved
+    assert "ABCD" not in history.read_text(encoding="utf-8")
+
+
 def test_cancel_queued_job_sets_cancelled_and_signals_event(manager: DownloadQueueManager) -> None:
     job = manager.create_job("EXAMPLE", "t")
     assert manager.cancel_job(job.job_id) is True
@@ -436,6 +457,33 @@ def test_worker_relays_a_notice_as_progress(monkeypatch: pytest.MonkeyPatch) -> 
     assert updates == [{"notice": "Enter pair code ABCD"}, {"notice": None}]
 
 
+def test_worker_relays_approval_as_structured_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    import sys
+    from types import SimpleNamespace
+
+    from unshackle.core.api import download_worker
+    from unshackle.core.approval import ApprovalNotice
+    from unshackle.core.console import set_approval_handler, set_prompt_handler, show_approval
+
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(fileno=lambda: read_fd))
+    updates: list[dict] = []
+
+    download_worker.relay_prompts(updates.append)
+    try:
+        show_approval(ApprovalNotice("Enter pair code ABCD"))
+        show_approval(None)
+    finally:
+        set_prompt_handler(None)
+        set_approval_handler(None)
+        os.close(write_fd)
+    assert updates == [
+        {"approval": {"message": "Enter pair code ABCD"}},
+        {"approval": None},
+    ]
+
+
 def test_a_prompt_discards_an_answer_sent_before_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A late answer to an earlier prompt must not answer the next one; the timeout is not retryable."""
     import sys
@@ -570,21 +618,28 @@ async def test_a_repeated_prompt_reaches_an_event_listener(
     assert job.input_prompt is None
 
 
-async def test_a_notice_reaches_the_job_and_an_event_listener(
+async def test_an_approval_reaches_the_job_and_an_event_listener(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manager: DownloadQueueManager
 ) -> None:
-    """The job carries the worker's notice while the worker waits, and drops it at the end."""
+    """The job carries structured approval while the worker waits, and drops it at the end."""
     import asyncio
 
     from unshackle.core.api import download_manager
+    from unshackle.core.api.events import bus
+
+    bus.history.clear()
 
     worker = tmp_path / "worker.py"
     # The prompt holds the worker open until the test has seen the notice.
-    source = FAKE_PROMPT_WORKER.replace("import prompt_user", "import prompt_user, show_notice").replace(
+    source = FAKE_PROMPT_WORKER.replace(
+        "from unshackle.core.console import prompt_user",
+        "from unshackle.core.approval import ApprovalNotice\n"
+        "from unshackle.core.console import prompt_user, show_approval",
+    ).replace(
         'answers = [prompt_user("Enter OTP"), prompt_user("Enter OTP")]',
-        'show_notice("Enter pair code ABCD")\nanswers = [prompt_user("Continue")]',
+        'show_approval(ApprovalNotice("Enter pair code ABCD"))\nanswers = [prompt_user("Continue")]',
     )
-    assert source.count("show_notice") == 2, "FAKE_PROMPT_WORKER changed; update the replacements"
+    assert source.count("show_approval") == 2, "FAKE_PROMPT_WORKER changed; update the replacements"
     worker.write_text(source, encoding="utf-8")
     spawn = asyncio.create_subprocess_exec
 
@@ -596,18 +651,19 @@ async def test_a_notice_reaches_the_job_and_an_event_listener(
     events = manager.subscribe(job.job_id)
     run = asyncio.create_task(manager.run_download_async(job))
 
-    async def answer_after_notice() -> None:
+    async def answer_after_approval() -> None:
         while True:
             event = await events.get()
             if event and event["data"]["input_prompt"]:
-                assert event["data"]["notice"] == "Enter pair code ABCD"
-                assert job.to_dict()["notice"] == "Enter pair code ABCD"
+                assert event["data"]["approval"] == {"message": "Enter pair code ABCD"}
+                assert job.to_dict()["approval"] == {"message": "Enter pair code ABCD"}
                 assert manager.submit_input(job, "ok") is True
                 return
 
-    await asyncio.wait_for(answer_after_notice(), timeout=20)
+    await asyncio.wait_for(answer_after_approval(), timeout=20)
     assert await asyncio.wait_for(run, timeout=20) == ["ok"]
-    assert job.notice is None
+    assert job.approval is None
+    assert "ABCD" not in repr(bus.history)
 
 
 async def test_input_handler_rejects_bad_requests(

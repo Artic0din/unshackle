@@ -118,6 +118,16 @@ def test_bus_publish_reenters_its_lock() -> None:
     assert [item["seq"] for item in local.since(0)] == [1]
 
 
+async def test_transient_bus_event_reaches_subscribers_without_replay_history() -> None:
+    local = EventBus()
+    subscriber = local.subscribe()
+
+    local.publish("approval", {"message": "Enter pair code ABCD"}, retain=False)
+
+    assert (await subscriber.get())["data"] == {"message": "Enter pair code ABCD"}
+    assert local.since(0) == []
+
+
 def test_ring_since_survives_concurrent_emit() -> None:
     ring = RingLogHandler(maxlen=5000)
     record = logging.LogRecord("test.ring", logging.INFO, __file__, 0, "m", None, None)

@@ -36,8 +36,9 @@ from requests.adapters import HTTPAdapter, Retry
 from rich.padding import Padding
 from rich.rule import Rule
 
+from unshackle.core.approval import ApprovalNotice
 from unshackle.core.config import config
-from unshackle.core.console import console, prompt_user, show_notice
+from unshackle.core.console import console, prompt_user, show_approval
 from unshackle.core.constants import AnyTrack
 from unshackle.core.credential import Credential
 from unshackle.core.drm import BlowfishStripe, cbcs, real_kids
@@ -1027,8 +1028,8 @@ class RemoteService:
         self._log_seq = 0
         self._recent_logs: deque[str] = deque(maxlen=3)
         self._input_bridge: Any = None  # a serve relaying for a REST client sets one, as it does for a Service
-        # what a login waiting on the user (a pair code, an approval link) last showed; None otherwise
-        self.auth_notice: Optional[str] = None
+        # transient approval owned by this login; None outside its approval window
+        self.auth_approval: Optional[ApprovalNotice] = None
         self._log_drain_lock = Lock()
         self._keepalive_stop = Event()
         self._reopen_lock = Lock()
@@ -1567,25 +1568,33 @@ class RemoteService:
             self.poll_auth(deadline, poll_interval)
         finally:
             self.close_cdm_sessions()
-            if self.auth_notice is not None:
-                self.auth_notice = None
-                show_notice(None)
+            if self.auth_approval is not None:
+                self.auth_approval = None
+                if self._input_bridge is not None:
+                    self._input_bridge.set_approval(None)
+                else:
+                    show_approval(None)
 
     def poll_auth(self, deadline: float, poll_interval: float) -> None:
         while time.monotonic() < deadline:
             resp = self.client.get(f"/api/session/{self._session_id}/prompt")
             status = resp.get("status")
-            seen = self._log_seq
             self.drain_server_logs()
+
+            raw_approval = resp.get("approval")
+            try:
+                approval = ApprovalNotice.from_dict(raw_approval) if raw_approval is not None else None
+            except (TypeError, ValueError):
+                raise RemoteError("Remote auth returned an invalid approval payload", "AUTH") from None
+            if approval != self.auth_approval:
+                self.auth_approval = approval
+                if self._input_bridge is not None:
+                    self._input_bridge.set_approval(approval)
+                else:
+                    show_approval(approval)
 
             if status == "authenticated":
                 return
-
-            if status == "authenticating" and self._log_seq == seen and self._recent_logs:
-                notice = "\n".join(self._recent_logs)
-                if notice != self.auth_notice:
-                    self.auth_notice = notice
-                    show_notice(notice)
 
             if status == "failed":
                 raise RemoteError(f"Remote auth failed: {resp.get('error', 'Authentication failed on server')}", "AUTH")

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from unshackle.core import remote_service
+from unshackle.core.approval import ApprovalNotice
 from unshackle.core.api import handlers
 from unshackle.core.api.errors import APIError, APIErrorCode
 from unshackle.core.config import config
@@ -182,19 +183,24 @@ def test_a_geofenced_remote_service_gets_its_first_allowed_region_as_proxy(monke
     assert handlers.geofence_proxy({}, fenced) == {}
 
 
-def test_a_quiet_remote_login_shows_its_last_server_lines_as_a_notice(monkeypatch):
+def test_remote_login_shows_structured_approval_instead_of_server_logs(monkeypatch):
     import logging
     from threading import Lock
 
     shown = []
-    monkeypatch.setattr(remote_service, "show_notice", shown.append)
+    monkeypatch.setattr(remote_service, "show_approval", shown.append)
     monkeypatch.setattr(remote_service.time, "sleep", lambda s: None)
-    logs = iter([["+ IP Region: CA"], ["+ Open URL: https://disneyplus.com/start\n+ Enter pair code: 9835-2503"], []])
-    statuses = iter(["authenticating", "authenticating", "authenticating", "authenticated"])
+    logs = iter([["+ IP Region: CA"], []])
+    responses = iter(
+        [
+            {"status": "authenticating", "approval": {"message": "Approve this device"}},
+            {"status": "authenticated"},
+        ]
+    )
 
     class Client:
         def get(self, endpoint):
-            return {"status": next(statuses)}
+            return next(responses)
 
         def get_optional(self, endpoint):
             batch = next(logs, [])
@@ -204,23 +210,57 @@ def test_a_quiet_remote_login_shows_its_last_server_lines_as_a_notice(monkeypatc
     remote = object.__new__(remote_service.RemoteService)
     remote.seq = 0
     remote.client, remote._session_id, remote._log_seq = Client(), "sid", 0
-    remote._recent_logs, remote.auth_notice, remote._log_drain_lock = [], None, Lock()
-    remote.log, remote._cdm_sessions = logging.getLogger("test"), {}
+    remote._recent_logs, remote.auth_approval, remote._log_drain_lock = [], None, Lock()
+    remote.log, remote._cdm_sessions, remote._input_bridge = logging.getLogger("test"), {}, None
     monkeypatch.setattr(remote_service.RemoteService, "local_cdm", None)
 
     remote.poll_auth_completion(poll_interval=0)
-    # silent while the remote was still logging; the pair code once it went quiet; cleared when done
-    assert shown == ["+ IP Region: CA\n+ Open URL: https://disneyplus.com/start\n+ Enter pair code: 9835-2503", None]
-    assert remote.auth_notice is None
+    assert shown == [ApprovalNotice("Approve this device"), None]
+    assert remote.auth_approval is None
+
+
+def test_headless_remote_login_routes_approval_through_its_session_bridge(monkeypatch):
+    import logging
+    from threading import Lock
+
+    from unshackle.core.api.input_bridge import InputBridge
+
+    bridge = InputBridge()
+    monkeypatch.setattr(remote_service, "show_approval", lambda approval: pytest.fail("used shared console"))
+    monkeypatch.setattr(remote_service.time, "sleep", lambda seconds: None)
+
+    class Client:
+        calls = 0
+
+        def get(self, endpoint):
+            self.calls += 1
+            if self.calls == 1:
+                return {"status": "authenticating", "approval": {"message": "Approve this device"}}
+            assert bridge.get_pending_approval() == ApprovalNotice("Approve this device")
+            return {"status": "authenticated"}
+
+        def get_optional(self, endpoint):
+            return {"logs": [], "last_seq": 0}
+
+    remote = object.__new__(remote_service.RemoteService)
+    remote.client, remote._session_id, remote._log_seq = Client(), "sid", 0
+    remote._recent_logs, remote.auth_approval, remote._log_drain_lock = [], None, Lock()
+    remote.log, remote._cdm_sessions, remote._input_bridge = logging.getLogger("test"), {}, bridge
+    monkeypatch.setattr(remote_service.RemoteService, "local_cdm", None)
+
+    remote.poll_auth_completion(poll_interval=0)
+
+    assert bridge.get_pending_approval() is None
 
 
 async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):
     import threading as th
 
     class Remote:
-        auth_notice = None
+        pass
 
     login = handlers.RemoteLogin("owner", "srv", "OTHER", "show", Remote())
+    login.bridge.set_approval(ApprovalNotice("Approve this device"))
     monkeypatch.setattr(handlers, "_remote_logins", {login.id: login})
     monkeypatch.setattr(handlers, "is_admin", lambda request: False)
     caller = {"key": "owner"}
@@ -233,6 +273,7 @@ async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):
 
     listed = json.loads((await handlers.remote_logins_handler(None)).text)["logins"]
     assert listed[0]["prompt"] == "Enter the code sent to your email"
+    assert listed[0]["approval"] == {"message": "Approve this device"}
 
     caller["key"] = "someone-else"
     assert json.loads((await handlers.remote_logins_handler(None)).text)["logins"] == []
