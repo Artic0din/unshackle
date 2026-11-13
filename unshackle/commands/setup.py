@@ -263,8 +263,7 @@ def destinations(clone: bool) -> tuple[Path, Path]:
 
 
 CLONE_STEPS = (
-    "  git clone https://github.com/unshackle-dl/unshackle.git\n"
-    "  then run install.sh (Linux) or install.bat (Windows) in the new unshackle folder"
+    "  git clone https://github.com/unshackle-dl/unshackle.git\n  then run install.sh in the new unshackle folder"
 )
 
 
