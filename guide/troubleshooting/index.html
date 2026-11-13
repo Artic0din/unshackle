@@ -2655,7 +2655,7 @@
 <ol>
 <li><code>unshackle.yaml</code> inside the package's namespace directory.</li>
 <li><code>unshackle.yaml</code> in the parent of that directory.</li>
-<li><code>unshackle.yaml</code> in your OS user-config directory: on Linux <code>~/.config/unshackle/unshackle.yaml</code>, on Windows <code>%LOCALAPPDATA%\unshackle\unshackle.yaml</code>, on macOS <code>~/Library/Application Support/unshackle/unshackle.yaml</code>.</li>
+<li><code>unshackle.yaml</code> in your OS user-config directory: on Linux <code>~/.config/unshackle/unshackle.yaml</code>, on macOS <code>~/Library/Application Support/unshackle/unshackle.yaml</code>.</li>
 </ol>
 <p>If you have config in more than one of these, an earlier one wins and unshackle silently ignores your edits to a later file. <code>unshackle env info</code> prints the path it loaded (or, if none exists, shows all three candidate locations so you can make the file correctly). See <a href="../cli-reference/#cfg">Configuration</a> for editing values with the <code>cfg</code> command.</p>
 <hr />

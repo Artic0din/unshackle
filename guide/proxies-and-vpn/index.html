@@ -3026,7 +3026,7 @@ because geolocation data can be out of date.</p>
 <p>Over the REST API, the server returns this failure to the client as <code>INVALID_PROXY</code>.</p>
 <h3 id="system-proxy-and-environment-variables">System proxy and environment variables<a class="headerlink" href="#system-proxy-and-environment-variables" title="Permanent link">&para;</a></h3>
 <p><code>--proxy</code> takes priority over the <code>HTTP_PROXY</code> and <code>HTTPS_PROXY</code> environment variables
-and over the Windows system proxy. unshackle still reads a <code>REQUESTS_CA_BUNDLE</code> or
+and over the system proxy. unshackle still reads a <code>REQUESTS_CA_BUNDLE</code> or
 <code>CURL_CA_BUNDLE</code> certificate bundle, so a local debugging proxy with its own certificate
 authority continues to work. Without <code>--proxy</code>, unshackle uses the system proxy.</p>
 <h3 id="requests-outside-the-proxy">Requests outside the proxy<a class="headerlink" href="#requests-outside-the-proxy" title="Permanent link">&para;</a></h3>

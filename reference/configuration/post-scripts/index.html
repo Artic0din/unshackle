@@ -2455,13 +2455,6 @@ If you want them, make the shell explicit: <code>bash -c "..."</code>.</p>
 <p>For the same reason there is no interpreter lookup. Write <code>python /opt/upload.py</code>
 rather than <code>/opt/upload.py</code>. unshackle will not guess whether you meant the system
 Python or the one in its own virtual environment.</p>
-<p>On Windows, when a <strong>fixed</strong> part of an argument contains a space, quote the whole
-argument (<code>"--out=C:\My Dir\{filename}"</code>), not only the value. Substituted values
-never need quoting on any OS.</p>
-<p>On Windows, do not target a <code>.bat</code> or <code>.cmd</code> file directly. Windows runs batch files
-through <code>cmd.exe</code>, whose argument quoting differs from every other program and has a
-history of letting a crafted value break out (CVE-2024-3566). Call the interpreter and
-pass the script as an argument (<code>python upload.py</code>, <code>pwsh -File upload.ps1</code>) instead.</p>
 </div>
 <p>By default, scripts are fire and forget. unshackle starts the process, writes the command to
 the debug log, and carries on. It does not wait for the script, capture its output, time it

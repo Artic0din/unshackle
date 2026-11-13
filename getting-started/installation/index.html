@@ -2408,21 +2408,14 @@ provisioning, the REST server, and the helper utilities.</p>
 <p>A git clone with the install script is the recommended way to install unshackle.
 A clone keeps unshackle, its external tools, its config, its data folders, and
 your services together in one folder that you can see.</p>
-<p>The repository has an install script for Linux (<code>install.sh</code>) and for Windows
-(<code>install.bat</code>). The script installs <code>uv</code> if it is not found, installs unshackle,
-and then runs <a href="#what-unshackle-setup-does"><code>unshackle setup</code></a>.</p>
-<div class="tabbed-set tabbed-alternate" data-tabs="1:2"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">Linux</label><label for="__tabbed_1_2">Windows</label></div>
+<p>The repository has an install script, <code>install.sh</code>. The script installs <code>uv</code>
+if it is not found, installs unshackle, and then runs <a href="#what-unshackle-setup-does"><code>unshackle setup</code></a>.</p>
+<div class="tabbed-set tabbed-alternate" data-tabs="1:1"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">Linux</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
 <div class="language-shell highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/unshackle-dl/unshackle.git
 </span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nb">cd</span><span class="w"> </span>unshackle
 </span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>sh<span class="w"> </span>install.sh
-</span></code></pre></div>
-</div>
-<div class="tabbed-block">
-<div class="language-bat highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>git clone https://github.com/unshackle-dl/unshackle.git
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="k">cd</span> unshackle
-</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>.\install.bat
 </span></code></pre></div>
 </div>
 </div>
@@ -2438,11 +2431,11 @@ you, and you can run it yourself at any time:</p>
 <div class="tabbed-set tabbed-alternate" data-tabs="2:2"><input checked="checked" id="__tabbed_2_1" name="__tabbed_2" type="radio" /><input id="__tabbed_2_2" name="__tabbed_2" type="radio" /><div class="tabbed-labels"><label for="__tabbed_2_1">From a clone</label><label for="__tabbed_2_2">Installed as a uv tool</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
-<div class="language-shell highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>uv<span class="w"> </span>run<span class="w"> </span>unshackle<span class="w"> </span>setup
+<div class="language-shell highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>uv<span class="w"> </span>run<span class="w"> </span>unshackle<span class="w"> </span>setup
 </span></code></pre></div>
 </div>
 <div class="tabbed-block">
-<div class="language-shell highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>unshackle<span class="w"> </span>setup
+<div class="language-shell highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>unshackle<span class="w"> </span>setup
 </span></code></pre></div>
 </div>
 </div>
@@ -2455,8 +2448,7 @@ you, and you can run it yourself at any time:</p>
    tools come first. shaka-packager and <code>mp4decrypt</code> share one DRM question, so
    <code>mp4decrypt</code> comes with the required tools, but <code>env check</code> still shows it
    as optional. The HDR and subtitle groups are optional. The prompts show the
-   version that setup downloads. On Windows, the subtitle question also shows
-   the download size of CCExtractor, which is much larger than the other tools.
+   version that setup downloads.
    It puts the downloads in a <code>binaries</code> folder
    (see <a href="#where-setup-puts-files">Where setup puts files</a>).</li>
 <li>If no <code>unshackle.yaml</code> exists, it asks for a downloads folder and writes a
@@ -2477,7 +2469,7 @@ you, and you can run it yourself at any time:</p>
 overwrites an existing config.</p>
 <div class="admonition note">
 <p class="admonition-title">Not every tool has a download</p>
-<p>Setup downloads tools only on Linux and Windows, and only when the tool
+<p>Setup downloads tools only on Linux, and only when the tool
 has a portable build for your system. For other tools, setup prints where
 to get them, for example a package manager. On macOS, setup downloads
 nothing and prints these links for each missing tool.</p>
@@ -2524,12 +2516,9 @@ again, or install the <code>ccextractor</code> package instead.</p>
 </tr>
 </tbody>
 </table>
-<p>On Windows, CCExtractor and its libraries go into their own <code>ccextractor</code>
-subfolder of the tools folder.</p>
 <p>On Linux, the user data directory is usually <code>~/.local/share/unshackle</code> and the
-user config directory is usually <code>~/.config/unshackle</code>. On Windows, both are
-<code>%LOCALAPPDATA%\unshackle</code>. Run <code>uv run unshackle env info</code> to see the paths that
-unshackle uses. Its <code>User_Binaries</code> row shows the <code>binaries</code> folder in the user
+user config directory is usually <code>~/.config/unshackle</code>. Run
+<code>uv run unshackle env info</code> to see the paths that unshackle uses. Its <code>User_Binaries</code> row shows the <code>binaries</code> folder in the user
 data directory.</p>
 <p>Setup writes a new config only when it finds no <code>unshackle.yaml</code> in any of the
 <a href="../configuration-file/">config locations</a>. It keeps an existing config where it
@@ -2609,13 +2598,13 @@ yourself.</p>
 <p>Use <code>uv run</code> inside the clone. It keeps the project's virtual environment active
 for the duration of the command, so you do not have to activate it yourself. It
 also installs the dependencies on the first run.</p>
-<div class="language-shell highlight"><span class="filename">Run from a git clone</span><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/unshackle-dl/unshackle.git
-</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="nb">cd</span><span class="w"> </span>unshackle
-</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>uv<span class="w"> </span>run<span class="w"> </span>unshackle<span class="w"> </span>setup
+<div class="language-shell highlight"><span class="filename">Run from a git clone</span><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/unshackle-dl/unshackle.git
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nb">cd</span><span class="w"> </span>unshackle
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>uv<span class="w"> </span>run<span class="w"> </span>unshackle<span class="w"> </span>setup
 </span></code></pre></div>
 <p>Every command shown elsewhere in these docs works the same way from a clone.
 Prefix it with <code>uv run</code>:</p>
-<div class="language-shell highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>uv<span class="w"> </span>run<span class="w"> </span>unshackle<span class="w"> </span>env<span class="w"> </span>check
+<div class="language-shell highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>uv<span class="w"> </span>run<span class="w"> </span>unshackle<span class="w"> </span>env<span class="w"> </span>check
 </span></code></pre></div>
 <h3 id="advanced-install-as-a-uv-tool">Advanced: install as a uv tool<a class="headerlink" href="#advanced-install-as-a-uv-tool" title="Permanent link">&para;</a></h3>
 <p>This way is for users who know <code>uv</code> tools and want the <code>unshackle</code> command on
@@ -2631,8 +2620,8 @@ one folder that you can see. On the first run from a <code>uv</code> tool instal
 <code>unshackle setup</code> tells you this and asks if you want to continue.</p>
 </div>
 <p>Install the tool and run setup:</p>
-<div class="language-shell highlight"><span class="filename">Install as a uv tool</span><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>git+https://github.com/unshackle-dl/unshackle.git
-</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>unshackle<span class="w"> </span>setup
+<div class="language-shell highlight"><span class="filename">Install as a uv tool</span><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>git+https://github.com/unshackle-dl/unshackle.git
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>unshackle<span class="w"> </span>setup
 </span></code></pre></div>
 <p>The install scripts also do this when you run one alone, without a clone: when
 the script does not find the unshackle <code>pyproject.toml</code> next to it, it runs
@@ -2807,11 +2796,11 @@ reports which tools it found:</p>
 <div class="tabbed-set tabbed-alternate" data-tabs="3:2"><input checked="checked" id="__tabbed_3_1" name="__tabbed_3" type="radio" /><input id="__tabbed_3_2" name="__tabbed_3" type="radio" /><div class="tabbed-labels"><label for="__tabbed_3_1">From a clone</label><label for="__tabbed_3_2">Installed as a uv tool</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
-<div class="language-shell highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>uv<span class="w"> </span>run<span class="w"> </span>unshackle<span class="w"> </span>env<span class="w"> </span>check
+<div class="language-shell highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>uv<span class="w"> </span>run<span class="w"> </span>unshackle<span class="w"> </span>env<span class="w"> </span>check
 </span></code></pre></div>
 </div>
 <div class="tabbed-block">
-<div class="language-shell highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>unshackle<span class="w"> </span>env<span class="w"> </span>check
+<div class="language-shell highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>unshackle<span class="w"> </span>env<span class="w"> </span>check
 </span></code></pre></div>
 </div>
 </div>
@@ -2832,7 +2821,7 @@ tool reports, or <code>-</code> when it reports none. It ends with a summary lin
 <h3 id="inspect-environment-paths">Inspect environment paths<a class="headerlink" href="#inspect-environment-paths" title="Permanent link">&para;</a></h3>
 <p>To see where unshackle will read its configuration from and where it stores
 downloads, caches, cookies, and devices, use:</p>
-<div class="language-shell highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>uv<span class="w"> </span>run<span class="w"> </span>unshackle<span class="w"> </span>env<span class="w"> </span>info
+<div class="language-shell highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>uv<span class="w"> </span>run<span class="w"> </span>unshackle<span class="w"> </span>env<span class="w"> </span>info
 </span></code></pre></div>
 <p>If no configuration file exists yet, this command lists the locations unshackle
 searches for one, so you know where to make it. See the
