@@ -188,7 +188,7 @@ list.
     or validate keeps the running settings and logs the reason. A change to `remote_only`,
     `services_refresh_interval`, the first PlayReady device, or any command-line flag needs
     a restart, and the log says so. A new `global_speed_limit` applies to jobs that start after the
-    reload; running jobs keep their share. Windows has no `SIGHUP`: restart the server there.
+    reload; running jobs keep their share.
 
 `server_cdm` decides whether the server runs the CDM licensing for that API key. Set it to
 `true` to enable every service, or to a list of service tags to enable only those. It is `false`

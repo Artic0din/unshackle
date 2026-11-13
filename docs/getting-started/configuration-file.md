@@ -34,12 +34,6 @@ The path of the per-user config directory depends on your operating system:
     ~/.config/unshackle/unshackle.yaml
     ```
 
-=== "Windows"
-
-    ```text
-    %LOCALAPPDATA%\unshackle\unshackle.yaml
-    ```
-
 === "macOS"
 
     ```text

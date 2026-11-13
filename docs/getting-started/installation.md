@@ -17,9 +17,8 @@ A git clone with the install script is the recommended way to install unshackle.
 A clone keeps unshackle, its external tools, its config, its data folders, and
 your services together in one folder that you can see.
 
-The repository has an install script for Linux (`install.sh`) and for Windows
-(`install.bat`). The script installs `uv` if it is not found, installs unshackle,
-and then runs [`unshackle setup`](#what-unshackle-setup-does).
+The repository has an install script, `install.sh`. The script installs `uv`
+if it is not found, installs unshackle, and then runs [`unshackle setup`](#what-unshackle-setup-does).
 
 === "Linux"
 
@@ -27,14 +26,6 @@ and then runs [`unshackle setup`](#what-unshackle-setup-does).
     git clone https://github.com/unshackle-dl/unshackle.git
     cd unshackle
     sh install.sh
-    ```
-
-=== "Windows"
-
-    ```bat
-    git clone https://github.com/unshackle-dl/unshackle.git
-    cd unshackle
-    .\install.bat
     ```
 
 In a clone, the script runs `uv sync` and then `uv run unshackle setup`. The last
@@ -69,8 +60,7 @@ The command does these steps:
    tools come first. shaka-packager and `mp4decrypt` share one DRM question, so
    `mp4decrypt` comes with the required tools, but `env check` still shows it
    as optional. The HDR and subtitle groups are optional. The prompts show the
-   version that setup downloads. On Windows, the subtitle question also shows
-   the download size of CCExtractor, which is much larger than the other tools.
+   version that setup downloads.
    It puts the downloads in a `binaries` folder
    (see [Where setup puts files](#where-setup-puts-files)).
 3. If no `unshackle.yaml` exists, it asks for a downloads folder and writes a
@@ -91,7 +81,7 @@ You can run the command again. It skips the tools that it finds and never
 overwrites an existing config.
 
 !!! note "Not every tool has a download"
-    Setup downloads tools only on Linux and Windows, and only when the tool
+    Setup downloads tools only on Linux, and only when the tool
     has a portable build for your system. For other tools, setup prints where
     to get them, for example a package manager. On macOS, setup downloads
     nothing and prints these links for each missing tool.
@@ -115,13 +105,9 @@ overwrites an existing config.
 | Data folders (cookies, WVDs, PRDs, cache, logs, services, temp) | The default folders in the clone | The user data directory |
 | Downloads | The folder that you give at the prompt | The folder that you give at the prompt |
 
-On Windows, CCExtractor and its libraries go into their own `ccextractor`
-subfolder of the tools folder.
-
 On Linux, the user data directory is usually `~/.local/share/unshackle` and the
-user config directory is usually `~/.config/unshackle`. On Windows, both are
-`%LOCALAPPDATA%\unshackle`. Run `uv run unshackle env info` to see the paths that
-unshackle uses. Its `User_Binaries` row shows the `binaries` folder in the user
+user config directory is usually `~/.config/unshackle`. Run
+`uv run unshackle env info` to see the paths that unshackle uses. Its `User_Binaries` row shows the `binaries` folder in the user
 data directory.
 
 Setup writes a new config only when it finds no `unshackle.yaml` in any of the

@@ -31,7 +31,7 @@ The recommended way is a git clone with the install script. The script installs 
 ```shell
 git clone https://github.com/unshackle-dl/unshackle.git
 cd unshackle
-sh install.sh                 # Windows: .\install.bat
+sh install.sh
 uv run unshackle env check
 ```
 

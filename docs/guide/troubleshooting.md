@@ -281,7 +281,7 @@ unshackle loads the **first** `unshackle.yaml` it finds, in this order:
 
 1. `unshackle.yaml` inside the package's namespace directory.
 2. `unshackle.yaml` in the parent of that directory.
-3. `unshackle.yaml` in your OS user-config directory: on Linux `~/.config/unshackle/unshackle.yaml`, on Windows `%LOCALAPPDATA%\unshackle\unshackle.yaml`, on macOS `~/Library/Application Support/unshackle/unshackle.yaml`.
+3. `unshackle.yaml` in your OS user-config directory: on Linux `~/.config/unshackle/unshackle.yaml`, on macOS `~/Library/Application Support/unshackle/unshackle.yaml`.
 
 If you have config in more than one of these, an earlier one wins and unshackle silently ignores your edits to a later file. `unshackle env info` prints the path it loaded (or, if none exists, shows all three candidate locations so you can make the file correctly). See [Configuration](cli-reference.md#cfg) for editing values with the `cfg` command.
 

@@ -58,15 +58,6 @@ means a path containing spaces always arrives as a single argument on every OS.
     rather than `/opt/upload.py`. unshackle will not guess whether you meant the system
     Python or the one in its own virtual environment.
 
-    On Windows, when a **fixed** part of an argument contains a space, quote the whole
-    argument (`"--out=C:\My Dir\{filename}"`), not only the value. Substituted values
-    never need quoting on any OS.
-
-    On Windows, do not target a `.bat` or `.cmd` file directly. Windows runs batch files
-    through `cmd.exe`, whose argument quoting differs from every other program and has a
-    history of letting a crafted value break out (CVE-2024-3566). Call the interpreter and
-    pass the script as an argument (`python upload.py`, `pwsh -File upload.ps1`) instead.
-
 By default, scripts are fire and forget. unshackle starts the process, writes the command to
 the debug log, and carries on. It does not wait for the script, capture its output, time it
 out, or change its own exit code when a script fails. A script keeps running if unshackle
