@@ -6,11 +6,17 @@ import pytest
 
 from unshackle.core import console
 from unshackle.core.api.input_bridge import NO_USER_MESSAGE, InputBridge, NoUserBridge
+from unshackle.core.approval import ApprovalNotice
 from unshackle.core.service import Service
 
 
 def _service(bridge=None):
     return SimpleNamespace(log=logging.getLogger("test"), _input_bridge=bridge)
+
+
+@pytest.fixture(autouse=True)
+def _approval_channel(monkeypatch):
+    monkeypatch.setattr(console, "_approval_handler", lambda notice: None, raising=False)
 
 
 def test_returns_the_first_value_check_gives():
@@ -40,11 +46,18 @@ def _raise_value_error():
     raise ValueError("denied")
 
 
-def test_logs_the_message_for_a_remote_session(caplog):
-    """A remote session reads the message only from the service log."""
+def test_remote_session_uses_structured_approval_without_logging_it(caplog):
+    bridge = InputBridge()
+
+    def check():
+        assert bridge.get_pending_approval() == ApprovalNotice("enter code")
+        return "token"
+
     with caplog.at_level(logging.INFO, logger="test"):
-        Service.wait_for_approval(_service(), "enter code", lambda: "token", timeout=5, interval=0)
-    assert "enter code" in caplog.messages
+        assert Service.wait_for_approval(_service(bridge), "enter code", check, timeout=5, interval=0) == "token"
+    assert "enter code" not in caplog.text
+    assert caplog.messages == ["Waiting for device approval"]
+    assert bridge.get_pending_approval() is None
 
 
 def test_a_request_with_no_user_fails_at_once():
@@ -70,9 +83,9 @@ def test_no_user_message_is_an_authentication_error():
         (_raise_value_error, pytest.raises(ValueError)),
     ],
 )
-def test_shows_the_message_as_a_notice_and_clears_it(monkeypatch, check, expectation):
-    notices = []
-    monkeypatch.setattr(console, "_notice_handler", notices.append)
+def test_shows_structured_approval_and_clears_it(monkeypatch, check, expectation):
+    approvals = []
+    monkeypatch.setattr(console, "_approval_handler", approvals.append)
     with expectation:
         Service.wait_for_approval(_service(), "enter code", check, timeout=0.05, interval=0.01)
-    assert notices == ["enter code", None]
+    assert approvals == [ApprovalNotice("enter code"), None]

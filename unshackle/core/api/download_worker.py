@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -16,10 +17,10 @@ from typing import Any, Callable, Dict
 from uuid import uuid4
 
 from unshackle.core.api.input_bridge import AUTH_INPUT_TIMEOUT
-from unshackle.core.console import set_notice_handler, set_prompt_handler
+from unshackle.core.console import set_approval_handler, set_notice_handler, set_prompt_handler
 from unshackle.core.downloaders import format_speed, set_speed_limit
 
-from .download_manager import perform_download
+from .download_manager import JOB_TEMP_PREFIX, perform_download
 
 log = logging.getLogger("download_worker")
 
@@ -44,7 +45,13 @@ def write_result(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
     try:
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        with open(
+            tmp,
+            "x",
+            encoding="utf-8",
+            opener=lambda file, flags: os.open(file, flags, 0o600),
+        ) as handle:
+            json.dump(payload, handle)
         with _replace_lock:
             for attempt in range(10):
                 try:
@@ -59,13 +66,15 @@ def write_result(path: Path, payload: Dict[str, Any]) -> None:
         raise
 
 
-def relay_prompts(progress_callback: Callable[[Dict[str, Any]], None]) -> None:
+def relay_prompts(
+    progress_callback: Callable[[Dict[str, Any]], None], on_parent_close: Callable[[], None] | None = None
+) -> None:
     """Send each prompt_user() prompt to the parent as ``input_prompt`` progress, and read the answer from stdin.
 
     The parent writes each answer as one JSON string per line, so an answer can hold a newline. The reader
     uses unbuffered stdin: a daemon thread blocked in ``sys.stdin.buffer`` aborts the interpreter at shutdown.
     Prompts go out one at a time, and a prompt discards answers that arrived before it, such as a late
-    answer to a prompt that timed out. A show_notice() message goes out as ``notice`` progress and needs no answer.
+    answer to a prompt that timed out. Notices and approvals are separate progress fields and need no answer.
     """
     answers: queue.Queue[str] = queue.Queue()
     one_prompt = threading.Lock()
@@ -73,6 +82,8 @@ def relay_prompts(progress_callback: Callable[[Dict[str, Any]], None]) -> None:
     def read_answers() -> None:
         for line in io.FileIO(sys.stdin.fileno(), "rb", closefd=False):
             answers.put(json.loads(line.decode("utf-8", errors="replace")))
+        if on_parent_close is not None:
+            on_parent_close()
 
     threading.Thread(target=read_answers, name="prompt-answers", daemon=True).start()
 
@@ -94,6 +105,9 @@ def relay_prompts(progress_callback: Callable[[Dict[str, Any]], None]) -> None:
 
     set_prompt_handler(ask)
     set_notice_handler(lambda message: progress_callback({"notice": message}))
+    set_approval_handler(
+        lambda approval: progress_callback({"approval": approval.to_dict() if approval is not None else None})
+    )
 
 
 def apply_payload_speed_limit(payload: Dict[str, Any]) -> None:
@@ -144,7 +158,17 @@ def main(argv: list[str]) -> int:
                 except Exception as e:
                     log.error(f"Failed to write progress update: {e}")
 
-        relay_prompts(progress_callback)
+        job_temp_dir = (
+            progress_path.parent if progress_path and progress_path.parent.name.startswith(JOB_TEMP_PREFIX) else None
+        )
+
+        def parent_closed() -> None:
+            with progress_lock:
+                if job_temp_dir is not None:
+                    shutil.rmtree(job_temp_dir, ignore_errors=True)
+                os._exit(1)
+
+        relay_prompts(progress_callback, on_parent_close=parent_closed)
         output_files = perform_download(job_id, service, title_id, params, progress_callback=progress_callback)
 
         result = {"status": "success", "output_files": output_files}

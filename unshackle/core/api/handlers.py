@@ -615,7 +615,7 @@ _remote_logins: Dict[str, RemoteLogin] = {}
 
 
 async def remote_logins_handler(request: web.Request) -> web.Response:
-    """Answer the request for the caller's remote logins in progress, each with its prompt and notice."""
+    """Answer the request for the caller's remote logins in progress, each with its prompt and approval."""
     owner, admin = caller_key(request), is_admin(request)
     logins = [
         {
@@ -624,7 +624,7 @@ async def remote_logins_handler(request: web.Request) -> web.Response:
             "service": login.service,
             "title_id": login.title_id,
             "prompt": login.bridge.get_pending_prompt(),
-            "notice": login.instance.auth_notice,
+            "approval": approval.to_dict() if (approval := login.bridge.get_pending_approval()) is not None else None,
         }
         for login in list(_remote_logins.values())
         if admin or login.owner == owner
@@ -4377,6 +4377,9 @@ async def session_prompt_get_handler(session_id: str, request: Optional[web.Requ
         prompt = bridge.get_pending_prompt()
         if prompt:
             return web.json_response({"status": "pending_input", "prompt": prompt})
+        approval = bridge.get_pending_approval()
+        if approval:
+            return web.json_response({"status": "authenticating", "approval": approval.to_dict()})
 
     return web.json_response({"status": "authenticating"})
 

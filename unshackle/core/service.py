@@ -18,9 +18,10 @@ from requests.adapters import HTTPAdapter, Retry
 from rich.padding import Padding
 from rich.rule import Rule
 
+from unshackle.core.approval import ApprovalNotice
 from unshackle.core.cacher import Cacher
 from unshackle.core.config import config
-from unshackle.core.console import console, prompt_user, show_notice
+from unshackle.core.console import console, prompt_user, show_approval
 from unshackle.core.constants import AnyTrack
 from unshackle.core.credential import Credential
 from unshackle.core.drm import DRM_T
@@ -480,10 +481,14 @@ class Service(metaclass=ABCMeta):
         Use it for a login that the user approves on another device, such as a pair code.
         ``check`` returns None while the approval is pending, and must return within a few
         seconds. Raises TimeoutError after ``timeout`` seconds, and RuntimeError when the
-        remote session no longer exists. A REST download job shows ``message`` as its ``notice``.
+        remote session no longer exists. Approval text is transient and never logged.
         """
-        self.log.info(message)
-        show_notice(message)
+        self.log.info("Waiting for device approval")
+        approval = ApprovalNotice(message)
+        if self._input_bridge is not None:
+            self._input_bridge.set_approval(approval)
+        else:
+            show_approval(approval)
         deadline = time.monotonic() + timeout
         try:
             while True:
@@ -496,7 +501,10 @@ class Service(metaclass=ABCMeta):
                     raise TimeoutError(f"No approval within {timeout:.0f}s")
                 time.sleep(interval)
         finally:
-            show_notice(None)
+            if self._input_bridge is not None:
+                self._input_bridge.set_approval(None)
+            else:
+                show_approval(None)
 
     def search(self) -> Generator[SearchResult, None, None]:
         """

@@ -1513,7 +1513,7 @@ async def download_job_input(request: web.Request) -> web.Response:
       Submit the answer to the prompt a running job waits on (an OTP code, a PIN, a device-code
       confirmation). The job shows the prompt in its `input_prompt` field and in its SSE `progress`
       events. The job fails if nobody answers within the prompt timeout. A job that waits for an
-      approval on another device shows the message in its `notice` field, which takes no answer.
+      approval on another device shows a transient object in its `approval` field, which takes no answer.
     parameters:
       - name: job_id
         in: path
@@ -2505,8 +2505,8 @@ async def session_prompt_get(request: web.Request) -> web.Response:
     """
     Poll for pending interactive prompts during authentication.
     ---
-    summary: Get auth prompt
-    description: Poll for pending interactive prompts (OTP, device code, PIN) during remote session authentication
+    summary: Get auth prompt or approval
+    description: Poll for pending interactive prompts or transient device approval during remote session authentication
     parameters:
       - name: session_id
         in: path
@@ -2527,6 +2527,13 @@ async def session_prompt_get(request: web.Request) -> web.Response:
                 prompt:
                   type: string
                   description: Prompt to display to the user (only when status is pending_input)
+                approval:
+                  type: object
+                  nullable: true
+                  description: Transient device-approval data; never retain it in logs or history
+                  properties:
+                    message:
+                      type: string
                 cdm_call:
                   type: object
                   additionalProperties: true
@@ -3301,9 +3308,9 @@ async def remote_logins(request: web.Request) -> web.Response:
     summary: Remote logins in progress
     description: >
       The caller's list calls that wait on a remote_services server's login, each with the remote
-      server, service and title, and `notice`: what the login shows the user while it waits on them,
-      such as a URL and pair code to enter on another device, or null. Poll it alongside a remote
-      list-titles, list-tracks or search call; a download job carries the same text as its `notice`.
+      server, service and title, and a transient `approval` object while it waits for device approval.
+      Poll it alongside a remote list-titles, list-tracks or search call; a download job exposes the
+      same transient object as `approval` and clients must not retain it.
     responses:
       '200':
         description: Logins in progress
@@ -3330,9 +3337,12 @@ async def remote_logins(request: web.Request) -> web.Response:
                         type: string
                         nullable: true
                         description: What the login asks the user (an OTP, a PIN), or null
-                      notice:
-                        type: string
+                      approval:
+                        type: object
                         nullable: true
+                        properties:
+                          message:
+                            type: string
     """
     return await remote_logins_handler(request)
 

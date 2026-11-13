@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from unshackle.core.approval import ApprovalNotice
+
 
 class AuthStatus(Enum):
     """Authentication lifecycle states for a remote session."""
@@ -46,6 +48,7 @@ class InputBridge:
     """
 
     _prompt: Optional[str] = field(default=None, init=False, repr=False)
+    _approval: Optional[ApprovalNotice] = field(default=None, init=False, repr=False)
     _response: Optional[str] = field(default=None, init=False, repr=False)
     _status: AuthStatus = field(default=AuthStatus.AUTHENTICATING, init=False)
     _cancelled: bool = field(default=False, init=False, repr=False)
@@ -83,6 +86,7 @@ class InputBridge:
         if not self._response_ready.wait(timeout=timeout):
             with self._lock:
                 self._status = AuthStatus.FAILED
+                self._approval = None
             raise TimeoutError(f"No client response for prompt within {timeout}s")
 
         with self._lock:
@@ -154,6 +158,20 @@ class InputBridge:
                 return self._prompt
             return None
 
+    def set_approval(self, approval: Optional[ApprovalNotice]) -> None:
+        """Set or clear the approval owned by this remote session."""
+        with self._lock:
+            if approval is not None and (
+                self._cancelled or self._status in (AuthStatus.AUTHENTICATED, AuthStatus.FAILED)
+            ):
+                raise RuntimeError("Remote session is no longer active")
+            self._approval = approval
+
+    def get_pending_approval(self) -> Optional[ApprovalNotice]:
+        """Return the active device approval, if any."""
+        with self._lock:
+            return self._approval
+
     def submit_response(self, response: str) -> bool:
         """Deliver the client's response and unblock the auth thread.
 
@@ -182,6 +200,7 @@ class InputBridge:
         with self._lock:
             self._cancelled = True
             self._status = AuthStatus.FAILED
+            self._approval = None
         self._picked_up.set()
         self._response_ready.set()
 
@@ -200,6 +219,8 @@ class InputBridge:
     def status(self, value: AuthStatus) -> None:
         with self._lock:
             self._status = value
+            if value in (AuthStatus.AUTHENTICATED, AuthStatus.FAILED):
+                self._approval = None
 
 
 NO_USER_MESSAGE = "This login needs the user, and only a download job or a remote session can reach the user"
@@ -210,6 +231,10 @@ class NoUserBridge(InputBridge):
 
     def request_input(self, prompt: str, timeout: float = AUTH_INPUT_TIMEOUT) -> str:
         raise RuntimeError(NO_USER_MESSAGE)
+
+    def set_approval(self, approval: Optional[ApprovalNotice]) -> None:
+        if approval is not None:
+            raise RuntimeError(NO_USER_MESSAGE)
 
     def ensure_active(self) -> None:
         raise RuntimeError(NO_USER_MESSAGE)

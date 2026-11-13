@@ -4,6 +4,7 @@ import logging
 import math
 import shutil
 import sys
+import threading
 import unicodedata
 from datetime import datetime
 from functools import lru_cache
@@ -14,7 +15,15 @@ import rich.cells
 from rich import box
 from rich._log_render import FormatTimeCallable, LogRender
 from rich.color import Color, blend_rgb
-from rich.console import Console, ConsoleOptions, ConsoleRenderable, HighlighterType, RenderableType, RenderResult
+from rich.console import (
+    Console,
+    ConsoleOptions,
+    ConsoleRenderable,
+    Group,
+    HighlighterType,
+    RenderableType,
+    RenderResult,
+)
 from rich.emoji import EmojiVariant
 from rich.highlighter import Highlighter, ReprHighlighter
 from rich.live import Live
@@ -29,6 +38,7 @@ from rich.table import Table
 from rich.text import Text, TextType
 from rich.theme import Theme
 
+from unshackle.core.approval import ApprovalNotice
 from unshackle.core.config import config
 from unshackle.core.themes import DEFAULT_THEME, PALETTES, apply_help_theme, resolve_palette
 
@@ -536,6 +546,51 @@ def show_notice(message: Optional[str]) -> None:
         _notice_handler(message)
 
 
+_approval_handler: Optional[Callable[[Optional[ApprovalNotice]], None]] = None
+_approval_live: Optional[SyncLive] = None
+_approval_renderables: dict[int, Padding] = {}
+_approval_lock = threading.Lock()
+
+
+def set_approval_handler(handler: Optional[Callable[[Optional[ApprovalNotice]], None]]) -> None:
+    """Route transient device approvals to the active session or job."""
+    global _approval_handler
+    _approval_handler = handler
+
+
+def show_approval(approval: Optional[ApprovalNotice]) -> None:
+    """Show an approval transiently, or clear the active approval with ``None``."""
+    global _approval_live
+    if _approval_handler is not None:
+        _approval_handler(approval)
+        return
+    owner = threading.get_ident()
+    with _approval_lock:
+        if approval is None:
+            _approval_renderables.pop(owner, None)
+            if not _approval_renderables:
+                live, _approval_live = _approval_live, None
+                if live is not None:
+                    live.stop()
+            elif _approval_live is not None:
+                _approval_live.update(Group(*_approval_renderables.values()), refresh=True)
+            return
+        if not console.is_terminal:
+            raise RuntimeError("Device approval requires an interactive terminal or an approval handler")
+        _approval_renderables[owner] = Padding(Text(approval.message, style="text"), (0, 5))
+        renderable = Group(*_approval_renderables.values())
+        if _approval_live is None:
+            live = SyncLive(renderable, console=console, transient=True)
+            try:
+                live.start()
+            except Exception:
+                _approval_renderables.pop(owner, None)
+                raise
+            _approval_live = live
+        else:
+            _approval_live.update(renderable, refresh=True)
+
+
 __all__ = (
     "ComfyLogRenderer",
     "ComfyRichHandler",
@@ -547,7 +602,9 @@ __all__ = (
     "listing_table",
     "print_wide",
     "prompt_user",
+    "set_approval_handler",
     "set_notice_handler",
     "set_prompt_handler",
+    "show_approval",
     "show_notice",
 )

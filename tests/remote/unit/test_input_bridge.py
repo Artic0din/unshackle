@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import threading
 import time
+from json import loads
+from types import SimpleNamespace
 
 import pytest
 
 from unshackle.core.api.input_bridge import AuthStatus, InputBridge
+from unshackle.core.approval import ApprovalNotice
 
 pytestmark = pytest.mark.unit
 
@@ -94,6 +97,42 @@ def test_status_setter() -> None:
     bridge = InputBridge()
     bridge.status = AuthStatus.AUTHENTICATED
     assert bridge.status is AuthStatus.AUTHENTICATED
+
+
+def test_approval_is_structured_and_cleared_on_terminal_state() -> None:
+    bridge = InputBridge()
+    approval = ApprovalNotice("Open the provider and enter the code")
+    bridge.set_approval(approval)
+    assert bridge.get_pending_approval() == approval
+
+    bridge.status = AuthStatus.AUTHENTICATED
+    assert bridge.get_pending_approval() is None
+
+
+def test_cancel_clears_approval() -> None:
+    bridge = InputBridge()
+    bridge.set_approval(ApprovalNotice("Approve this device"))
+    bridge.cancel()
+    assert bridge.get_pending_approval() is None
+
+
+async def test_prompt_handler_returns_session_owned_approval(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unshackle.core.api import handlers
+
+    bridge = InputBridge()
+    bridge.set_approval(ApprovalNotice("Approve this device"))
+    session = SimpleNamespace(input_bridge=bridge, auth_status=AuthStatus.AUTHENTICATING, auth_error=None)
+
+    async def get_session(session_id: str, request=None):
+        assert session_id == "session-a"
+        return session
+
+    monkeypatch.setattr(handlers, "get_validated_session", get_session)
+    response = await handlers.session_prompt_get_handler("session-a")
+    assert loads(response.text) == {
+        "status": "authenticating",
+        "approval": {"message": "Approve this device"},
+    }
 
 
 def test_request_input_after_authentication_fails_fast() -> None:

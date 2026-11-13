@@ -1,10 +1,12 @@
 import asyncio
+import fcntl
 import hashlib
 import importlib
 import json
 import logging
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -15,10 +17,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, cast
+
+from filelock import FileLock
 
 from unshackle.core.api.events import bus, publish_service_event
 from unshackle.core.api.sanitize import sanitize_log
+from unshackle.core.approval import ApprovalNotice
 from unshackle.core.utils.redact import REDACTED, URL_USERINFO_RE, redact_all, redact_path, redact_text
 from unshackle.core.utils.service_params import cast_service_options, service_options
 
@@ -26,6 +31,65 @@ if TYPE_CHECKING:
     from unshackle.core.service import Service
 
 log = logging.getLogger("download_manager")
+
+JOB_TEMP_PREFIX = "unshackle_api_job_"
+JOB_TEMP_LOCK = ".lock"
+
+
+def _job_temp_root() -> Path:
+    from unshackle.core.config import config
+
+    root = config.directories.temp / "api_jobs"
+    root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError(f"Job temp path must be a private directory: {root}")
+    root.chmod(0o700)
+    return root
+
+
+def _job_temp_setup_lock() -> FileLock:
+    return FileLock(_job_temp_root() / ".setup.lock")
+
+
+def _sweep_stale_job_temp_dirs() -> None:
+    with _job_temp_setup_lock():
+        for directory in _job_temp_root().glob(f"{JOB_TEMP_PREFIX}*"):
+            if directory.is_symlink() or not directory.is_dir():
+                continue
+            lock_fd = -1
+            try:
+                lock_fd = os.open(directory / JOB_TEMP_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError):
+                if lock_fd >= 0:
+                    os.close(lock_fd)
+                continue
+            os.close(lock_fd)
+            shutil.rmtree(directory)
+
+
+def _create_job_temp_dir(job_id: str) -> tuple[Path, int]:
+    with _job_temp_setup_lock():
+        directory = Path(tempfile.mkdtemp(prefix=f"{JOB_TEMP_PREFIX}{job_id}_", dir=_job_temp_root()))
+        directory.chmod(0o700)
+        lock_fd = os.open(directory / JOB_TEMP_LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    return directory, lock_fd
+
+
+def _remove_job_temp_dir(directory: Path, lock_fd: int) -> None:
+    with _job_temp_setup_lock():
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        shutil.rmtree(directory)
+
+
+def _remove_job_temp_files(paths: Iterable[str]) -> None:
+    for raw_path in paths:
+        path = Path(raw_path)
+        for candidate in (path, *path.parent.glob(f"{path.name}.*.tmp")):
+            with suppress(OSError):
+                candidate.unlink()
 
 
 # Job parameters may carry secrets (a raw "user:pass" credential, a proxy URL with embedded
@@ -133,6 +197,8 @@ class DownloadJob:
     input_prompt: Optional[str] = None
     # Message a service shows through show_notice() while it waits for an approval; needs no answer.
     notice: Optional[str] = None
+    # Device approval visible only while this job owns it; never written to job history.
+    approval: Optional[ApprovalNotice] = None
 
     # Subtitles skipped under skip_subtitle_errors (non-fatal). Each entry is a dl.SkippedSubtitle
     # dict (id / language / title) so a client can report which weren't available.
@@ -170,6 +236,7 @@ class DownloadJob:
             "skipped_subtitles": self.skipped_subtitles,
             "input_prompt": self.input_prompt,
             "notice": self.notice,
+            "approval": self.approval.to_dict() if self.approval is not None else None,
         }
 
         if include_full_details:
@@ -556,6 +623,7 @@ class DownloadQueueManager:
     """Manages download job queue with configurable concurrency limits."""
 
     def __init__(self, max_concurrent_downloads: int = 2, job_retention_hours: int = 24) -> None:
+        _sweep_stale_job_temp_dirs()
         self.max_concurrent_downloads = max_concurrent_downloads
         self.job_retention_hours = job_retention_hours
 
@@ -627,7 +695,8 @@ class DownloadQueueManager:
     def publish(self, job: DownloadJob, event: str) -> None:
         """Fan an event carrying the job's full detail dict out to every listener."""
         data = job.to_dict(include_full_details=True)
-        bus.publish("job", {"event": event, **data})
+        dashboard_data = {key: value for key, value in data.items() if key != "approval"}
+        bus.publish("job", {"event": event, **dashboard_data})
         queues = self._subscribers.get(job.job_id)
         if not queues:
             return
@@ -923,27 +992,33 @@ class DownloadQueueManager:
             "speed_limit": self.worker_speed_limit(),
         }
 
-        payload_fd, payload_path = tempfile.mkstemp(prefix=f"unshackle_job_{job.job_id}_", suffix="_payload.json")
-        os.close(payload_fd)
-        result_fd, result_path = tempfile.mkstemp(prefix=f"unshackle_job_{job.job_id}_", suffix="_result.json")
-        os.close(result_fd)
-        progress_fd, progress_path = tempfile.mkstemp(prefix=f"unshackle_job_{job.job_id}_", suffix="_progress.json")
-        os.close(progress_fd)
+        job_temp_dir, job_temp_lock = _create_job_temp_dir(job.job_id)
+        try:
+            payload_fd, payload_path = tempfile.mkstemp(dir=job_temp_dir, suffix="_payload.json")
+            os.close(payload_fd)
+            result_fd, result_path = tempfile.mkstemp(dir=job_temp_dir, suffix="_result.json")
+            os.close(result_fd)
+            progress_fd, progress_path = tempfile.mkstemp(dir=job_temp_dir, suffix="_progress.json")
+            os.close(progress_fd)
 
-        with open(payload_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
+            with open(payload_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
 
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "unshackle.core.api.download_worker",
-            payload_path,
-            result_path,
-            progress_path,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "unshackle.core.api.download_worker",
+                payload_path,
+                result_path,
+                progress_path,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                pass_fds=(job_temp_lock,),
+            )
+        except BaseException:
+            _remove_job_temp_dir(job_temp_dir, job_temp_lock)
+            raise
 
         self._download_processes[job.job_id] = process
         self._job_temp_files[job.job_id] = {"payload": payload_path, "result": result_path, "progress": progress_path}
@@ -1004,6 +1079,9 @@ class DownloadQueueManager:
                                 job.input_prompt = progress_data["input_prompt"]
                             if "notice" in progress_data:
                                 job.notice = progress_data["notice"]
+                            if "approval" in progress_data:
+                                raw_approval = progress_data["approval"]
+                                job.approval = ApprovalNotice.from_dict(raw_approval) if raw_approval else None
                             if progress_data.get("skipped_subtitles"):
                                 job.skipped_subtitles = progress_data["skipped_subtitles"]
                             if "progress" in progress_data:
@@ -1091,13 +1169,10 @@ class DownloadQueueManager:
             self._download_processes.pop(job.job_id, None)
             job.input_prompt = None
             job.notice = None
+            job.approval = None
 
-            temp_paths = self._job_temp_files.pop(job.job_id, {})
-            for path in temp_paths.values():
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            _remove_job_temp_files(self._job_temp_files.pop(job.job_id, {}).values())
+            _remove_job_temp_dir(job_temp_dir, job_temp_lock)
 
     async def cleanup_worker(self) -> None:
         """Job worker that periodically cleans up old jobs."""
