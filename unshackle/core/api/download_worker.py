@@ -44,7 +44,13 @@ def write_result(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
     try:
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        with open(
+            tmp,
+            "x",
+            encoding="utf-8",
+            opener=lambda file, flags: os.open(file, flags, 0o600),
+        ) as handle:
+            json.dump(payload, handle)
         with _replace_lock:
             for attempt in range(10):
                 try:

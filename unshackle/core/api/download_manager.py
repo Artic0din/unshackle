@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, cast
 
 from unshackle.core.api.events import bus, publish_service_event
 from unshackle.core.api.sanitize import sanitize_log
@@ -27,6 +27,14 @@ if TYPE_CHECKING:
     from unshackle.core.service import Service
 
 log = logging.getLogger("download_manager")
+
+
+def _remove_job_temp_files(paths: Iterable[str]) -> None:
+    for raw_path in paths:
+        path = Path(raw_path)
+        for candidate in (path, *path.parent.glob(f"{path.name}.*.tmp")):
+            with suppress(OSError):
+                candidate.unlink()
 
 
 # Job parameters may carry secrets (a raw "user:pass" credential, a proxy URL with embedded
@@ -631,7 +639,8 @@ class DownloadQueueManager:
     def publish(self, job: DownloadJob, event: str) -> None:
         """Fan an event carrying the job's full detail dict out to every listener."""
         data = job.to_dict(include_full_details=True)
-        bus.publish("job", {"event": event, **data}, retain=job.approval is None)
+        dashboard_data = {key: value for key, value in data.items() if key != "approval"}
+        bus.publish("job", {"event": event, **dashboard_data})
         queues = self._subscribers.get(job.job_id)
         if not queues:
             return
@@ -1100,12 +1109,7 @@ class DownloadQueueManager:
             job.notice = None
             job.approval = None
 
-            temp_paths = self._job_temp_files.pop(job.job_id, {})
-            for path in temp_paths.values():
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+            _remove_job_temp_files(self._job_temp_files.pop(job.job_id, {}).values())
 
     async def cleanup_worker(self) -> None:
         """Job worker that periodically cleans up old jobs."""

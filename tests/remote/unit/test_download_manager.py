@@ -193,6 +193,38 @@ def test_worker_write_result_retries_denied_replace(tmp_path: Path, monkeypatch:
     assert len(attempts) == 2
 
 
+def test_worker_write_result_keeps_owner_only_permissions(tmp_path: Path) -> None:
+    import os
+    import stat
+
+    from unshackle.core.api import download_worker
+
+    target = tmp_path / "progress.json"
+    previous_umask = os.umask(0o022)
+    try:
+        download_worker.write_result(target, {"approval": {"message": "Approve this device"}})
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_worker_file_cleanup_removes_atomic_write_leftovers(tmp_path: Path) -> None:
+    from unshackle.core.api.download_manager import _remove_job_temp_files
+
+    progress = tmp_path / "progress.json"
+    leftover = tmp_path / "progress.json.abcd.tmp"
+    unrelated = tmp_path / "other.json.abcd.tmp"
+    for path in (progress, leftover, unrelated):
+        path.touch()
+
+    _remove_job_temp_files([str(progress)])
+
+    assert not progress.exists()
+    assert not leftover.exists()
+    assert unrelated.exists()
+
+
 class _CapturedCtx(Exception):
     pass
 
@@ -664,6 +696,30 @@ async def test_an_approval_reaches_the_job_and_an_event_listener(
     assert await asyncio.wait_for(run, timeout=20) == ["ok"]
     assert job.approval is None
     assert "ABCD" not in repr(bus.history)
+
+
+async def test_approval_is_not_sent_to_global_event_listeners(
+    monkeypatch: pytest.MonkeyPatch, manager: DownloadQueueManager
+) -> None:
+    from unshackle.core.api import download_manager
+    from unshackle.core.api.events import EventBus
+    from unshackle.core.approval import ApprovalNotice
+
+    local_bus = EventBus()
+    monkeypatch.setattr(download_manager, "bus", local_bus)
+    dashboard_events = local_bus.subscribe()
+    job = manager.create_job("EXAMPLE", "t")
+    await dashboard_events.get()
+    job_events = manager.subscribe(job.job_id)
+
+    job.approval = ApprovalNotice("Enter pair code ABCD")
+    manager.publish(job, "progress")
+
+    dashboard_event = await dashboard_events.get()
+    job_event = await job_events.get()
+    assert "approval" not in dashboard_event["data"]
+    assert "ABCD" not in repr(dashboard_event)
+    assert job_event["data"]["approval"] == {"message": "Enter pair code ABCD"}
 
 
 async def test_input_handler_rejects_bad_requests(

@@ -4,6 +4,7 @@ import logging
 import math
 import shutil
 import sys
+import threading
 import unicodedata
 from datetime import datetime
 from functools import lru_cache
@@ -14,7 +15,15 @@ import rich.cells
 from rich import box
 from rich._log_render import FormatTimeCallable, LogRender
 from rich.color import Color, blend_rgb
-from rich.console import Console, ConsoleOptions, ConsoleRenderable, HighlighterType, RenderableType, RenderResult
+from rich.console import (
+    Console,
+    ConsoleOptions,
+    ConsoleRenderable,
+    Group,
+    HighlighterType,
+    RenderableType,
+    RenderResult,
+)
 from rich.emoji import EmojiVariant
 from rich.highlighter import Highlighter, ReprHighlighter
 from rich.live import Live
@@ -539,6 +548,8 @@ def show_notice(message: Optional[str]) -> None:
 
 _approval_handler: Optional[Callable[[Optional[ApprovalNotice]], None]] = None
 _approval_live: Optional[SyncLive] = None
+_approval_renderables: dict[int, Padding] = {}
+_approval_lock = threading.Lock()
 
 
 def set_approval_handler(handler: Optional[Callable[[Optional[ApprovalNotice]], None]]) -> None:
@@ -553,19 +564,31 @@ def show_approval(approval: Optional[ApprovalNotice]) -> None:
     if _approval_handler is not None:
         _approval_handler(approval)
         return
-    if approval is None:
-        if _approval_live is not None:
-            _approval_live.stop()
-            _approval_live = None
-        return
-    if not console.is_terminal:
-        raise RuntimeError("Device approval requires an interactive terminal or an approval handler")
-    renderable = Padding(Text(approval.message, style="text"), (0, 5))
-    if _approval_live is None:
-        _approval_live = SyncLive(renderable, console=console, transient=True)
-        _approval_live.start()
-    else:
-        _approval_live.update(renderable, refresh=True)
+    owner = threading.get_ident()
+    with _approval_lock:
+        if approval is None:
+            _approval_renderables.pop(owner, None)
+            if not _approval_renderables:
+                live, _approval_live = _approval_live, None
+                if live is not None:
+                    live.stop()
+            elif _approval_live is not None:
+                _approval_live.update(Group(*_approval_renderables.values()), refresh=True)
+            return
+        if not console.is_terminal:
+            raise RuntimeError("Device approval requires an interactive terminal or an approval handler")
+        _approval_renderables[owner] = Padding(Text(approval.message, style="text"), (0, 5))
+        renderable = Group(*_approval_renderables.values())
+        if _approval_live is None:
+            live = SyncLive(renderable, console=console, transient=True)
+            try:
+                live.start()
+            except Exception:
+                _approval_renderables.pop(owner, None)
+                raise
+            _approval_live = live
+        else:
+            _approval_live.update(renderable, refresh=True)
 
 
 __all__ = (
