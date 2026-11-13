@@ -225,6 +225,71 @@ def test_worker_file_cleanup_removes_atomic_write_leftovers(tmp_path: Path) -> N
     assert unrelated.exists()
 
 
+def test_manager_startup_removes_only_unlocked_job_temp_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from filelock import FileLock
+
+    from unshackle.core.api import download_manager
+
+    monkeypatch.setattr(download_manager, "_job_temp_root", lambda: tmp_path)
+    stale = tmp_path / "unshackle_api_job_stale"
+    live = tmp_path / "unshackle_api_job_live"
+    for directory in (stale, live):
+        directory.mkdir(mode=0o700)
+        (directory / "progress.json").write_text("approval", encoding="utf-8")
+    live_lock = FileLock(live / ".lock")
+    live_lock.acquire()
+    try:
+        DownloadQueueManager()
+        assert not stale.exists()
+        assert live.exists()
+    finally:
+        live_lock.release()
+
+    DownloadQueueManager()
+    assert not live.exists()
+
+
+def test_job_temp_root_is_owner_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import stat
+
+    from unshackle.core.api import download_manager
+    from unshackle.core.config import config
+
+    monkeypatch.setattr(config.directories, "temp", tmp_path)
+
+    root = download_manager._job_temp_root()
+
+    assert root.parent == tmp_path
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+
+def test_worker_process_holds_job_temp_directory_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    import subprocess
+    import sys
+
+    from unshackle.core.api import download_manager
+
+    monkeypatch.setattr(download_manager, "_job_temp_root", lambda: tmp_path)
+    directory, lock_fd = download_manager._create_job_temp_dir("job")
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        pass_fds=(lock_fd,),
+    )
+    os.close(lock_fd)
+    try:
+        download_manager._sweep_stale_job_temp_dirs()
+        assert directory.exists()
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+    download_manager._sweep_stale_job_temp_dirs()
+    assert not directory.exists()
+
+
 class _CapturedCtx(Exception):
     pass
 
@@ -487,6 +552,24 @@ def test_worker_relays_a_notice_as_progress(monkeypatch: pytest.MonkeyPatch) -> 
         set_notice_handler(None)
         os.close(write_fd)
     assert updates == [{"notice": "Enter pair code ABCD"}, {"notice": None}]
+
+
+def test_worker_detects_parent_input_eof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    import threading
+
+    from unshackle.core.api import download_worker
+    from unshackle.core.console import set_approval_handler, set_notice_handler, set_prompt_handler
+
+    parent_closed = threading.Event()
+    with (tmp_path / "stdin").open("w+b") as empty_stdin:
+        monkeypatch.setattr(sys, "stdin", empty_stdin)
+        download_worker.relay_prompts(lambda _update: None, on_parent_close=parent_closed.set)
+        assert parent_closed.wait(timeout=5)
+
+    set_prompt_handler(None)
+    set_notice_handler(None)
+    set_approval_handler(None)
 
 
 def test_worker_relays_approval_as_structured_progress(monkeypatch: pytest.MonkeyPatch) -> None:

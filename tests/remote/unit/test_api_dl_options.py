@@ -125,7 +125,7 @@ def test_the_worker_keeps_the_code_of_an_api_error(tmp_path, monkeypatch):
         raise APIError(APIErrorCode.INVALID_PARAMETERS, "Invalid workers: expected a number, not a boolean")
 
     monkeypatch.setattr(download_worker, "perform_download", refuse)
-    monkeypatch.setattr(download_worker, "relay_prompts", lambda callback: None)
+    monkeypatch.setattr(download_worker, "relay_prompts", lambda callback, on_parent_close=None: None)
     payload, result = tmp_path / "payload.json", tmp_path / "result.json"
     payload.write_text(json.dumps({"job_id": "j", "service": "EXAMPLE", "title_id": "t", "parameters": {}}))
     download_worker.main(["download_worker", str(payload), str(result)])
