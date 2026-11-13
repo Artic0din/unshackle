@@ -58,15 +58,6 @@ A git clone with the install script is the recommended way to install unshackle.
     uv run unshackle env check
     ```
 
-=== "Windows (recommended)"
-
-    ```bat
-    git clone https://github.com/unshackle-dl/unshackle.git
-    cd unshackle
-    .\install.bat
-    uv run unshackle env check
-    ```
-
 === "Advanced: uv tool"
 
     ```shell

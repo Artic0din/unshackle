@@ -237,7 +237,7 @@ Over the REST API, the server returns this failure to the client as `INVALID_PRO
 ### System proxy and environment variables
 
 `--proxy` takes priority over the `HTTP_PROXY` and `HTTPS_PROXY` environment variables
-and over the Windows system proxy. unshackle still reads a `REQUESTS_CA_BUNDLE` or
+and over the system proxy. unshackle still reads a `REQUESTS_CA_BUNDLE` or
 `CURL_CA_BUNDLE` certificate bundle, so a local debugging proxy with its own certificate
 authority continues to work. Without `--proxy`, unshackle uses the system proxy.
 
