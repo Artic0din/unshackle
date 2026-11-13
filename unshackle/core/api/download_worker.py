@@ -13,11 +13,17 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 from uuid import uuid4
 
 from unshackle.core.api.input_bridge import AUTH_INPUT_TIMEOUT
-from unshackle.core.console import set_approval_handler, set_notice_handler, set_prompt_handler
+from unshackle.core.authentication import AuthenticationObservation, AuthenticationState
+from unshackle.core.console import (
+    set_approval_handler,
+    set_authentication_handler,
+    set_notice_handler,
+    set_prompt_handler,
+)
 from unshackle.core.downloaders import format_speed, set_speed_limit
 
 from .download_manager import JOB_TEMP_PREFIX, perform_download
@@ -78,6 +84,12 @@ def relay_prompts(
     """
     answers: queue.Queue[str] = queue.Queue()
     one_prompt = threading.Lock()
+    authentication_observation: Optional[AuthenticationObservation] = None
+
+    def report_authentication(observation: Optional[AuthenticationObservation]) -> None:
+        nonlocal authentication_observation
+        authentication_observation = observation
+        progress_callback({"authentication": observation.to_dict() if observation is not None else None})
 
     def read_answers() -> None:
         for line in io.FileIO(sys.stdin.fileno(), "rb", closefd=False):
@@ -95,6 +107,14 @@ def relay_prompts(
             try:
                 return answers.get(timeout=AUTH_INPUT_TIMEOUT)
             except queue.Empty:
+                report_authentication(
+                    AuthenticationObservation(
+                        AuthenticationState.TIMED_OUT,
+                        method=(
+                            authentication_observation.active_method if authentication_observation is not None else None
+                        ),
+                    )
+                )
                 # "authentication" makes categorize_exception report AUTH_FAILED, not a retryable network
                 # error: a retry only waits on another prompt.
                 raise TimeoutError(
@@ -108,6 +128,7 @@ def relay_prompts(
     set_approval_handler(
         lambda approval: progress_callback({"approval": approval.to_dict() if approval is not None else None})
     )
+    set_authentication_handler(report_authentication)
 
 
 def apply_payload_speed_limit(payload: Dict[str, Any]) -> None:

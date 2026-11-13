@@ -37,8 +37,13 @@ from rich.padding import Padding
 from rich.rule import Rule
 
 from unshackle.core.approval import ApprovalNotice
+from unshackle.core.authentication import (
+    AuthenticationFailure,
+    AuthenticationObservation,
+    AuthenticationState,
+)
 from unshackle.core.config import config
-from unshackle.core.console import console, prompt_user, show_approval
+from unshackle.core.console import console, prompt_user, publish_authentication, show_approval
 from unshackle.core.constants import AnyTrack
 from unshackle.core.credential import Credential
 from unshackle.core.drm import BlowfishStripe, cbcs, real_kids
@@ -1030,6 +1035,7 @@ class RemoteService:
         self._input_bridge: Any = None  # a serve relaying for a REST client sets one, as it does for a Service
         # transient approval owned by this login; None outside its approval window
         self.auth_approval: Optional[ApprovalNotice] = None
+        self.auth_observation: Optional[AuthenticationObservation] = None
         self._log_drain_lock = Lock()
         self._keepalive_stop = Event()
         self._reopen_lock = Lock()
@@ -1475,6 +1481,7 @@ class RemoteService:
         grants = (self._server_cdm, self._server_device, self._server_vault)
         self._keepalive_stop.set()
         self._session_id = None
+        self.set_authentication_observation(None)
         if self.client.tunnel:  # the server forgot the tunnel too
             self.client.tunnel.stop()
             self.client.tunnel = None
@@ -1566,6 +1573,33 @@ class RemoteService:
         deadline = time.monotonic() + timeout
         try:
             self.poll_auth(deadline, poll_interval)
+        except BaseException as exc:
+            current = getattr(self, "auth_observation", None)
+            bridge_observation = (
+                self._input_bridge.get_authentication_observation() if self._input_bridge is not None else None
+            )
+            if bridge_observation is not None and bridge_observation.is_terminal:
+                self.auth_observation = bridge_observation
+            elif current is None or not current.is_terminal:
+                method = current.active_method if current is not None else None
+                if isinstance(exc, KeyboardInterrupt):
+                    self.set_authentication_observation(
+                        AuthenticationObservation(AuthenticationState.CANCELLED, method=method)
+                    )
+                elif isinstance(exc, TimeoutError):
+                    self.set_authentication_observation(
+                        AuthenticationObservation(AuthenticationState.TIMED_OUT, method=method)
+                    )
+                else:
+                    failure = (
+                        AuthenticationFailure.NETWORK
+                        if isinstance(exc, RemoteError) and exc.kind in {"CONNECT", "TIMEOUT", "TUNNEL_CLOSED"}
+                        else AuthenticationFailure.APPLICATION
+                    )
+                    self.set_authentication_observation(
+                        AuthenticationObservation(AuthenticationState.ERROR, method=method, failure=failure)
+                    )
+            raise
         finally:
             self.close_cdm_sessions()
             if self.auth_approval is not None:
@@ -1574,6 +1608,17 @@ class RemoteService:
                     self._input_bridge.set_approval(None)
                 else:
                     show_approval(None)
+            current = getattr(self, "auth_observation", None)
+            if current is not None and not current.is_terminal:
+                self.set_authentication_observation(None)
+
+    def set_authentication_observation(self, observation: Optional[AuthenticationObservation]) -> None:
+        """Relay one redacted server observation to this login's owning session or job."""
+        self.auth_observation = observation
+        if getattr(self, "_input_bridge", None) is not None:
+            self._input_bridge.set_authentication_observation(observation)
+        else:
+            publish_authentication(observation)
 
     def poll_auth(self, deadline: float, poll_interval: float) -> None:
         while time.monotonic() < deadline:
@@ -1593,10 +1638,36 @@ class RemoteService:
                 else:
                     show_approval(approval)
 
+            if "authentication" in resp:
+                raw_observation = resp["authentication"]
+                try:
+                    observation = (
+                        AuthenticationObservation.from_dict(raw_observation) if raw_observation is not None else None
+                    )
+                except (TypeError, ValueError):
+                    raise RemoteError("Remote auth returned an invalid authentication observation", "AUTH") from None
+                if observation != getattr(self, "auth_observation", None):
+                    self.set_authentication_observation(observation)
+
             if status == "authenticated":
                 return
 
             if status == "failed":
+                current = getattr(self, "auth_observation", None)
+                if current is None or not current.is_terminal:
+                    failure = (
+                        AuthenticationFailure.AUTHENTICATION_REJECTED
+                        if current is not None
+                        and current.state in (AuthenticationState.SESSION_EXPIRED, AuthenticationState.SESSION_REJECTED)
+                        else AuthenticationFailure.APPLICATION
+                    )
+                    self.set_authentication_observation(
+                        AuthenticationObservation(
+                            AuthenticationState.ERROR,
+                            method=current.active_method if current is not None else None,
+                            failure=failure,
+                        )
+                    )
                 raise RemoteError(f"Remote auth failed: {resp.get('error', 'Authentication failed on server')}", "AUTH")
 
             if status == "pending_input" and isinstance(resp.get("cdm_call"), dict):
@@ -1618,6 +1689,14 @@ class RemoteService:
 
             time.sleep(poll_interval)
 
+        self.set_authentication_observation(
+            AuthenticationObservation(
+                AuthenticationState.TIMED_OUT,
+                method=(
+                    current.active_method if (current := getattr(self, "auth_observation", None)) is not None else None
+                ),
+            )
+        )
         raise RemoteError("Remote authentication timed out", "AUTH")
 
     def answer_cdm_call(self, call: Dict[str, Any], sessions: Dict[str, bytes]) -> None:
