@@ -615,7 +615,7 @@ _remote_logins: Dict[str, RemoteLogin] = {}
 
 
 async def remote_logins_handler(request: web.Request) -> web.Response:
-    """Answer the request for the caller's remote logins in progress, each with its prompt and approval."""
+    """Answer the caller's remote logins with their prompt, approval, and redacted auth state."""
     owner, admin = caller_key(request), is_admin(request)
     logins = [
         {
@@ -625,6 +625,11 @@ async def remote_logins_handler(request: web.Request) -> web.Response:
             "title_id": login.title_id,
             "prompt": login.bridge.get_pending_prompt(),
             "approval": approval.to_dict() if (approval := login.bridge.get_pending_approval()) is not None else None,
+            "authentication": (
+                observation.to_dict()
+                if (observation := login.bridge.get_authentication_observation()) is not None
+                else None
+            ),
         }
         for login in list(_remote_logins.values())
         if admin or login.owner == owner
@@ -2696,9 +2701,11 @@ async def dashboard_sessions_handler(request: web.Request) -> web.Response:
 
 async def dashboard_jobs_handler(request: web.Request) -> web.Response:
     """Every download job, not owner-scoped."""
-    from unshackle.core.api.download_manager import get_download_manager
+    from unshackle.core.api.download_manager import dashboard_job_view, get_download_manager
 
-    return web.json_response([job.to_dict(include_full_details=True) for job in get_download_manager().list_jobs()])
+    return web.json_response(
+        [dashboard_job_view(job.to_dict(include_full_details=True)) for job in get_download_manager().list_jobs()]
+    )
 
 
 def _poll_cursor(before: int, items: List[Dict[str, Any]]) -> int:
@@ -4362,26 +4369,31 @@ async def session_prompt_get_handler(session_id: str, request: Optional[web.Requ
     session = await get_validated_session(session_id, request)
 
     bridge = session.input_bridge
+    observation = bridge.get_authentication_observation() if bridge else None
+
+    def response(payload: Dict[str, Any]) -> web.Response:
+        if observation is not None:
+            payload["authentication"] = observation.to_dict()
+        return web.json_response(payload)
+
     if bridge and (cdm_call := bridge.get_pending_cdm_call()):
-        return web.json_response(
-            {"status": "pending_input", "prompt": bridge.get_pending_prompt(), "cdm_call": cdm_call}
-        )
+        return response({"status": "pending_input", "prompt": bridge.get_pending_prompt(), "cdm_call": cdm_call})
 
     if session.auth_status == AuthStatus.AUTHENTICATED:
-        return web.json_response({"status": "authenticated"})
+        return response({"status": "authenticated"})
 
     if session.auth_status == AuthStatus.FAILED:
-        return web.json_response({"status": "failed", "error": session.auth_error or "unknown error"})
+        return response({"status": "failed", "error": session.auth_error or "unknown error"})
 
     if bridge:
         prompt = bridge.get_pending_prompt()
         if prompt:
-            return web.json_response({"status": "pending_input", "prompt": prompt})
+            return response({"status": "pending_input", "prompt": prompt})
         approval = bridge.get_pending_approval()
         if approval:
-            return web.json_response({"status": "authenticating", "approval": approval.to_dict()})
+            return response({"status": "authenticating", "approval": approval.to_dict()})
 
-    return web.json_response({"status": "authenticating"})
+    return response({"status": "authenticating"})
 
 
 async def session_prompt_post_handler(

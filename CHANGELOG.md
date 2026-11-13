@@ -8,6 +8,10 @@ This changelog is automatically generated using [git-cliff](https://git-cliff.or
 
 ## [Unreleased]
 
+### Features
+
+- *auth*: Expose redacted authentication lifecycle observations
+
 ### Bug Fixes
 
 - *auth*: Keep device approval codes out of durable logs

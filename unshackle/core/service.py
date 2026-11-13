@@ -5,7 +5,7 @@ from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional, Sequence, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Optional, Sequence, TypeVar, Union
 
 if TYPE_CHECKING:
     from unshackle.core.api.input_bridge import InputBridge
@@ -19,9 +19,10 @@ from rich.padding import Padding
 from rich.rule import Rule
 
 from unshackle.core.approval import ApprovalNotice
+from unshackle.core.authentication import AuthenticationObservation, AuthMethod
 from unshackle.core.cacher import Cacher
 from unshackle.core.config import config
-from unshackle.core.console import console, prompt_user, show_approval
+from unshackle.core.console import console, prompt_user, publish_authentication, show_approval
 from unshackle.core.constants import AnyTrack
 from unshackle.core.credential import Credential
 from unshackle.core.drm import DRM_T
@@ -50,7 +51,6 @@ from unshackle.core.utils.redact import mask_proxy
 # Default (connect, read) timeout for the requests path, mirroring RnetSession's
 # connect_timeout / read_timeout construction defaults. A per-request timeout= wins.
 DEFAULT_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
-AuthMethod = Literal["cookies", "credentials", "pairing"]
 
 
 class TimeoutSession(requests.Session):
@@ -472,6 +472,15 @@ class Service(metaclass=ABCMeta):
         if self._input_bridge is not None:
             return self._input_bridge.request_input(prompt)
         return prompt_user(prompt)
+
+    def observe_authentication(self, observation: AuthenticationObservation) -> None:
+        """Publish one redacted authentication lifecycle snapshot to the owning session or job."""
+        if not isinstance(observation, AuthenticationObservation):
+            raise TypeError("Expected an AuthenticationObservation")
+        if self._input_bridge is not None:
+            self._input_bridge.set_authentication_observation(observation)
+        else:
+            publish_authentication(observation)
 
     def wait_for_approval(
         self, message: str, check: Callable[[], Optional[T]], timeout: float, interval: float = 3.0

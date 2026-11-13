@@ -11,6 +11,7 @@ import pytest
 
 from unshackle.core.api.input_bridge import AuthStatus, InputBridge
 from unshackle.core.approval import ApprovalNotice
+from unshackle.core.authentication import AuthenticationObservation, AuthenticationState
 
 pytestmark = pytest.mark.unit
 
@@ -54,6 +55,7 @@ def test_request_input_times_out() -> None:
     with pytest.raises(TimeoutError, match="No client response"):
         bridge.request_input("hello", timeout=0.6)
     assert bridge.status is AuthStatus.FAILED
+    assert bridge.get_authentication_observation() == AuthenticationObservation(AuthenticationState.TIMED_OUT)
 
 
 def test_cancel_before_request_raises_immediately() -> None:
@@ -95,8 +97,13 @@ def test_get_pending_prompt_returns_none_outside_pending_state() -> None:
 
 def test_status_setter() -> None:
     bridge = InputBridge()
+    bridge.set_authentication_observation(AuthenticationObservation(AuthenticationState.RENEWING, method="pairing"))
     bridge.status = AuthStatus.AUTHENTICATED
     assert bridge.status is AuthStatus.AUTHENTICATED
+    assert bridge.get_authentication_observation() == AuthenticationObservation(
+        AuthenticationState.AUTHENTICATED,
+        method="pairing",
+    )
 
 
 def test_approval_is_structured_and_cleared_on_terminal_state() -> None:
@@ -116,6 +123,22 @@ def test_cancel_clears_approval() -> None:
     assert bridge.get_pending_approval() is None
 
 
+def test_authentication_observation_is_owned_and_terminal_cleanup_is_classified() -> None:
+    bridge = InputBridge()
+    other = InputBridge()
+    waiting = AuthenticationObservation(AuthenticationState.WAITING, method="pairing")
+    bridge.set_authentication_observation(waiting)
+
+    assert bridge.get_authentication_observation() == waiting
+    assert other.get_authentication_observation() is None
+
+    bridge.cancel()
+    assert bridge.get_authentication_observation() == AuthenticationObservation(
+        AuthenticationState.CANCELLED,
+        method="pairing",
+    )
+
+
 async def test_prompt_handler_returns_session_owned_approval(monkeypatch: pytest.MonkeyPatch) -> None:
     from unshackle.core.api import handlers
 
@@ -132,6 +155,29 @@ async def test_prompt_handler_returns_session_owned_approval(monkeypatch: pytest
     assert loads(response.text) == {
         "status": "authenticating",
         "approval": {"message": "Approve this device"},
+    }
+
+
+async def test_prompt_handler_returns_only_the_session_owned_authentication_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unshackle.core.api import handlers
+
+    bridge = InputBridge()
+    bridge.set_authentication_observation(
+        AuthenticationObservation(AuthenticationState.SESSION_PRESENT, method="cookies")
+    )
+    session = SimpleNamespace(input_bridge=bridge, auth_status=AuthStatus.AUTHENTICATING, auth_error=None)
+
+    async def get_session(session_id: str, request=None):
+        assert session_id == "session-a"
+        return session
+
+    monkeypatch.setattr(handlers, "get_validated_session", get_session)
+    response = await handlers.session_prompt_get_handler("session-a")
+    assert loads(response.text) == {
+        "status": "authenticating",
+        "authentication": {"state": "session_present", "method": "cookies"},
     }
 
 

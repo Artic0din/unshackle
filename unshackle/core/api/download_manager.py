@@ -24,6 +24,11 @@ from filelock import FileLock
 from unshackle.core.api.events import bus, publish_service_event
 from unshackle.core.api.sanitize import sanitize_log
 from unshackle.core.approval import ApprovalNotice
+from unshackle.core.authentication import (
+    AuthenticationFailure,
+    AuthenticationObservation,
+    AuthenticationState,
+)
 from unshackle.core.utils.redact import REDACTED, URL_USERINFO_RE, redact_all, redact_path, redact_text
 from unshackle.core.utils.service_params import cast_service_options, service_options
 
@@ -199,6 +204,8 @@ class DownloadJob:
     notice: Optional[str] = None
     # Device approval visible only while this job owns it; never written to job history.
     approval: Optional[ApprovalNotice] = None
+    # Redacted lifecycle snapshot visible only to the job owner; only terminal snapshots enter history.
+    authentication: Optional[AuthenticationObservation] = None
 
     # Subtitles skipped under skip_subtitle_errors (non-fatal). Each entry is a dl.SkippedSubtitle
     # dict (id / language / title) so a client can report which weren't available.
@@ -237,6 +244,7 @@ class DownloadJob:
             "input_prompt": self.input_prompt,
             "notice": self.notice,
             "approval": self.approval.to_dict() if self.approval is not None else None,
+            "authentication": self.authentication.to_dict() if self.authentication is not None else None,
         }
 
         if include_full_details:
@@ -261,6 +269,11 @@ class DownloadJob:
             )
 
         return result
+
+
+def dashboard_job_view(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a job snapshot without fields owned by one job client."""
+    return {key: value for key, value in job.items() if key not in {"approval", "authentication"}}
 
 
 def history_path() -> Path:
@@ -289,7 +302,7 @@ def record_job_history(job: DownloadJob) -> None:
     if job.history_recorded or job.status not in TERMINAL_STATUSES:
         return
     job.history_recorded = True
-    entry = {
+    entry: dict[str, Any] = {
         "job_id": job.job_id,
         "owner": owner_id(job.owner_key),
         "service": job.service,
@@ -302,6 +315,8 @@ def record_job_history(job: DownloadJob) -> None:
         "parameters": redact_parameters(job.parameters),
         "error_message": _redact_text(job.error_message, job.parameters),
     }
+    if job.authentication is not None and job.authentication.is_terminal:
+        entry["authentication"] = job.authentication.to_dict()
     try:
         path = history_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -321,6 +336,29 @@ def record_job_history(job: DownloadJob) -> None:
                     path.write_text("\n".join(existing[-limit:]) + "\n", encoding="utf-8")  # keep newest N
     except OSError as e:
         log.warning(f"Could not write job history: {e}")
+
+
+def finalize_job_authentication(job: DownloadJob) -> None:
+    """Replace an in-flight authentication snapshot with the job's secret-free terminal result."""
+    current = job.authentication
+    if current is None or current.is_terminal:
+        return
+    method = current.active_method
+    if job.status is JobStatus.CANCELLED:
+        job.authentication = AuthenticationObservation(AuthenticationState.CANCELLED, method=method)
+    elif job.status is JobStatus.COMPLETED:
+        job.authentication = AuthenticationObservation(AuthenticationState.AUTHENTICATED, method=method)
+    elif job.status is JobStatus.FAILED:
+        failure = (
+            AuthenticationFailure.AUTHENTICATION_REJECTED
+            if current.state in (AuthenticationState.SESSION_EXPIRED, AuthenticationState.SESSION_REJECTED)
+            else AuthenticationFailure.APPLICATION
+        )
+        job.authentication = AuthenticationObservation(
+            AuthenticationState.ERROR,
+            method=method,
+            failure=failure,
+        )
 
 
 def read_job_history(
@@ -695,8 +733,7 @@ class DownloadQueueManager:
     def publish(self, job: DownloadJob, event: str) -> None:
         """Fan an event carrying the job's full detail dict out to every listener."""
         data = job.to_dict(include_full_details=True)
-        dashboard_data = {key: value for key, value in data.items() if key != "approval"}
-        bus.publish("job", {"event": event, **dashboard_data})
+        bus.publish("job", {"event": event, **dashboard_job_view(data)})
         queues = self._subscribers.get(job.job_id)
         if not queues:
             return
@@ -934,6 +971,7 @@ class DownloadQueueManager:
                     log.error(f"Job {job.job_id} failed: {e}")
                 finally:
                     job.completed_time = datetime.now()
+                    finalize_job_authentication(job)
                     record_job_history(job)
                     self.publish_terminal(job)
                     if job.job_id in self._active_downloads:
@@ -1039,10 +1077,6 @@ class DownloadQueueManager:
         try:
             while True:
                 done, _ = await asyncio.wait({communicate_task}, timeout=0.5)
-                if communicate_task in done:
-                    stdout_bytes, stderr_bytes = communicate_task.result()
-                    break
-
                 # Check for progress updates (skip re-parse when the file hasn't changed since last tick)
                 try:
                     stat = os.stat(progress_path)
@@ -1082,6 +1116,13 @@ class DownloadQueueManager:
                             if "approval" in progress_data:
                                 raw_approval = progress_data["approval"]
                                 job.approval = ApprovalNotice.from_dict(raw_approval) if raw_approval else None
+                            if "authentication" in progress_data:
+                                raw_authentication = progress_data["authentication"]
+                                job.authentication = (
+                                    AuthenticationObservation.from_dict(raw_authentication)
+                                    if raw_authentication
+                                    else None
+                                )
                             if progress_data.get("skipped_subtitles"):
                                 job.skipped_subtitles = progress_data["skipped_subtitles"]
                             if "progress" in progress_data:
@@ -1097,6 +1138,10 @@ class DownloadQueueManager:
                         last_progress_stat = stat_key
                 except (OSError, json.JSONDecodeError, ValueError) as e:
                     log.debug(f"Could not read progress for job {job.job_id}: {e}")
+
+                if communicate_task in done:
+                    stdout_bytes, stderr_bytes = communicate_task.result()
+                    break
 
                 if job.cancel_event.is_set() or job.status == JobStatus.CANCELLED:
                     log.info(f"Cancellation detected for job {job.job_id}, terminating worker process")

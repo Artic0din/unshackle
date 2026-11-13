@@ -39,6 +39,7 @@ from rich.text import Text, TextType
 from rich.theme import Theme
 
 from unshackle.core.approval import ApprovalNotice
+from unshackle.core.authentication import AuthenticationObservation
 from unshackle.core.config import config
 from unshackle.core.themes import DEFAULT_THEME, PALETTES, apply_help_theme, resolve_palette
 
@@ -546,6 +547,23 @@ def show_notice(message: Optional[str]) -> None:
         _notice_handler(message)
 
 
+_authentication_handler: Optional[Callable[[Optional[AuthenticationObservation]], None]] = None
+
+
+def set_authentication_handler(
+    handler: Optional[Callable[[Optional[AuthenticationObservation]], None]],
+) -> None:
+    """Route redacted authentication observations to the active session or job."""
+    global _authentication_handler
+    _authentication_handler = handler
+
+
+def publish_authentication(observation: Optional[AuthenticationObservation]) -> None:
+    """Publish a redacted authentication observation when a lifecycle consumer is active."""
+    if _authentication_handler is not None:
+        _authentication_handler(observation)
+
+
 _approval_handler: Optional[Callable[[Optional[ApprovalNotice]], None]] = None
 _approval_live: Optional[SyncLive] = None
 _approval_renderables: dict[int, Padding] = {}
@@ -602,7 +620,9 @@ __all__ = (
     "listing_table",
     "print_wide",
     "prompt_user",
+    "publish_authentication",
     "set_approval_handler",
+    "set_authentication_handler",
     "set_notice_handler",
     "set_prompt_handler",
     "show_approval",

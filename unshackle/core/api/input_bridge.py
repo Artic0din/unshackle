@@ -16,6 +16,12 @@ from enum import Enum
 from typing import Any, Optional
 
 from unshackle.core.approval import ApprovalNotice
+from unshackle.core.authentication import (
+    AuthenticationFailure,
+    AuthenticationObservation,
+    AuthenticationState,
+    AuthMethod,
+)
 
 
 class AuthStatus(Enum):
@@ -49,6 +55,7 @@ class InputBridge:
 
     _prompt: Optional[str] = field(default=None, init=False, repr=False)
     _approval: Optional[ApprovalNotice] = field(default=None, init=False, repr=False)
+    _authentication_observation: Optional[AuthenticationObservation] = field(default=None, init=False, repr=False)
     _response: Optional[str] = field(default=None, init=False, repr=False)
     _status: AuthStatus = field(default=AuthStatus.AUTHENTICATING, init=False)
     _cancelled: bool = field(default=False, init=False, repr=False)
@@ -87,6 +94,10 @@ class InputBridge:
             with self._lock:
                 self._status = AuthStatus.FAILED
                 self._approval = None
+                self._authentication_observation = AuthenticationObservation(
+                    AuthenticationState.TIMED_OUT,
+                    method=self._active_authentication_method(),
+                )
             raise TimeoutError(f"No client response for prompt within {timeout}s")
 
         with self._lock:
@@ -172,6 +183,26 @@ class InputBridge:
         with self._lock:
             return self._approval
 
+    def set_authentication_observation(self, observation: Optional[AuthenticationObservation]) -> None:
+        """Set the redacted authentication snapshot owned by this remote session."""
+        if observation is not None and not isinstance(observation, AuthenticationObservation):
+            raise TypeError("Expected an AuthenticationObservation")
+        with self._lock:
+            if observation is not None and (
+                self._cancelled or self._status in (AuthStatus.AUTHENTICATED, AuthStatus.FAILED)
+            ):
+                raise RuntimeError("Remote session is no longer active")
+            self._authentication_observation = observation
+
+    def get_authentication_observation(self) -> Optional[AuthenticationObservation]:
+        """Return the current redacted authentication snapshot, if any."""
+        with self._lock:
+            return self._authentication_observation
+
+    def _active_authentication_method(self) -> Optional[AuthMethod]:
+        observation = self._authentication_observation
+        return observation.active_method if observation is not None else None
+
     def submit_response(self, response: str) -> bool:
         """Deliver the client's response and unblock the auth thread.
 
@@ -201,6 +232,10 @@ class InputBridge:
             self._cancelled = True
             self._status = AuthStatus.FAILED
             self._approval = None
+            self._authentication_observation = AuthenticationObservation(
+                AuthenticationState.CANCELLED,
+                method=self._active_authentication_method(),
+            )
         self._picked_up.set()
         self._response_ready.set()
 
@@ -221,6 +256,27 @@ class InputBridge:
             self._status = value
             if value in (AuthStatus.AUTHENTICATED, AuthStatus.FAILED):
                 self._approval = None
+                current = self._authentication_observation
+                if current is not None and current.is_terminal:
+                    return
+                method = self._active_authentication_method()
+                if value is AuthStatus.AUTHENTICATED:
+                    self._authentication_observation = AuthenticationObservation(
+                        AuthenticationState.AUTHENTICATED,
+                        method=method,
+                    )
+                else:
+                    failure = (
+                        AuthenticationFailure.AUTHENTICATION_REJECTED
+                        if current is not None
+                        and current.state in (AuthenticationState.SESSION_EXPIRED, AuthenticationState.SESSION_REJECTED)
+                        else AuthenticationFailure.APPLICATION
+                    )
+                    self._authentication_observation = AuthenticationObservation(
+                        AuthenticationState.ERROR,
+                        method=method,
+                        failure=failure,
+                    )
 
 
 NO_USER_MESSAGE = "This login needs the user, and only a download job or a remote session can reach the user"

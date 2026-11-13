@@ -599,6 +599,68 @@ def test_worker_relays_approval_as_structured_progress(monkeypatch: pytest.Monke
     ]
 
 
+def test_worker_relays_a_redacted_authentication_observation(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    import sys
+    from types import SimpleNamespace
+
+    from unshackle.core.api import download_worker
+    from unshackle.core.authentication import AuthenticationObservation, AuthenticationState
+    from unshackle.core.console import publish_authentication, set_authentication_handler, set_prompt_handler
+
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(fileno=lambda: read_fd))
+    updates: list[dict] = []
+
+    download_worker.relay_prompts(updates.append)
+    try:
+        publish_authentication(AuthenticationObservation(AuthenticationState.RENEWING, method="pairing"))
+    finally:
+        set_prompt_handler(None)
+        set_authentication_handler(None)
+        os.close(write_fd)
+    assert updates == [{"authentication": {"state": "renewing", "method": "pairing"}}]
+
+
+def test_worker_records_authentication_prompt_timeout_with_the_active_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    import sys
+    from types import SimpleNamespace
+
+    from unshackle.core.api import download_worker
+    from unshackle.core.authentication import AuthenticationObservation, AuthenticationState
+    from unshackle.core.console import (
+        prompt_user,
+        publish_authentication,
+        set_authentication_handler,
+        set_prompt_handler,
+    )
+
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(fileno=lambda: read_fd))
+    monkeypatch.setattr(download_worker, "AUTH_INPUT_TIMEOUT", 0.01)
+    updates: list[dict] = []
+
+    download_worker.relay_prompts(updates.append)
+    try:
+        publish_authentication(AuthenticationObservation(AuthenticationState.WAITING, method="pairing"))
+        with pytest.raises(TimeoutError, match="authentication prompt"):
+            prompt_user("Continue")
+    finally:
+        set_prompt_handler(None)
+        set_authentication_handler(None)
+        os.close(write_fd)
+
+    assert updates == [
+        {"authentication": {"state": "waiting", "method": "pairing"}},
+        {"input_prompt": "Continue"},
+        {"authentication": {"state": "timed_out", "method": "pairing"}},
+        {"input_prompt": None},
+    ]
+
+
 def test_a_prompt_discards_an_answer_sent_before_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A late answer to an earlier prompt must not answer the next one; the timeout is not retryable."""
     import sys
@@ -698,6 +760,50 @@ download_worker.relay_prompts(progress)
 answers = [prompt_user("Enter OTP"), prompt_user("Enter OTP")]
 download_worker.write_result(result_path, {"status": "success", "output_files": answers})
 """
+
+
+FAST_TERMINAL_AUTH_WORKER = """
+import sys
+from pathlib import Path
+
+from unshackle.core.api import download_worker
+
+result_path, progress_path = Path(sys.argv[-2]), Path(sys.argv[-1])
+download_worker.write_result(
+    progress_path,
+    {"authentication": {"state": "error", "method": "pairing", "failure": "network"}},
+)
+download_worker.write_result(result_path, {"status": "error", "message": "failed"})
+sys.exit(1)
+"""
+
+
+async def test_fast_worker_terminal_authentication_is_read_before_process_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manager: DownloadQueueManager
+) -> None:
+    import asyncio
+
+    from unshackle.core.api import download_manager
+
+    worker = tmp_path / "worker.py"
+    worker.write_text(FAST_TERMINAL_AUTH_WORKER, encoding="utf-8")
+    spawn = asyncio.create_subprocess_exec
+
+    async def spawn_fake_worker(executable: str, *args: str, **kwargs: Any) -> Any:
+        return await spawn(executable, str(worker), *args[2:], **kwargs)
+
+    monkeypatch.setattr(download_manager.asyncio, "create_subprocess_exec", spawn_fake_worker)
+    job = manager.create_job("EXAMPLE", "t")
+
+    with pytest.raises(Exception, match="Worker exited"):
+        await asyncio.wait_for(manager.run_download_async(job), timeout=20)
+
+    assert job.authentication is not None
+    assert job.authentication.to_dict() == {
+        "state": "error",
+        "method": "pairing",
+        "failure": "network",
+    }
 
 
 async def test_a_repeated_prompt_reaches_an_event_listener(
@@ -803,6 +909,130 @@ async def test_approval_is_not_sent_to_global_event_listeners(
     assert "approval" not in dashboard_event["data"]
     assert "ABCD" not in repr(dashboard_event)
     assert job_event["data"]["approval"] == {"message": "Enter pair code ABCD"}
+
+
+async def test_authentication_observation_is_job_owned_and_terminal_history_is_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manager: DownloadQueueManager
+) -> None:
+    import json
+
+    from unshackle.core.api import download_manager
+    from unshackle.core.api.events import EventBus
+    from unshackle.core.authentication import (
+        AuthenticationFailure,
+        AuthenticationObservation,
+        AuthenticationState,
+    )
+
+    history = tmp_path / "history.jsonl"
+    monkeypatch.setattr(download_manager, "history_path", lambda: history)
+    local_bus = EventBus()
+    monkeypatch.setattr(download_manager, "bus", local_bus)
+    dashboard_events = local_bus.subscribe()
+    job = manager.create_job("EXAMPLE", "t")
+    await dashboard_events.get()
+    job_events = manager.subscribe(job.job_id)
+    job.authentication = AuthenticationObservation(
+        AuthenticationState.ERROR,
+        method="pairing",
+        failure=AuthenticationFailure.NETWORK,
+    )
+
+    manager.publish(job, "progress")
+
+    dashboard_event = await dashboard_events.get()
+    job_event = await job_events.get()
+    assert "authentication" not in dashboard_event["data"]
+    assert job_event["data"]["authentication"] == {
+        "state": "error",
+        "method": "pairing",
+        "failure": "network",
+    }
+
+    job.status = JobStatus.FAILED
+    download_manager.record_job_history(job)
+    saved = json.loads(history.read_text(encoding="utf-8"))
+    assert saved["authentication"] == job_event["data"]["authentication"]
+    assert set(saved["authentication"]) == {"state", "method", "failure"}
+
+
+async def test_dashboard_job_snapshot_excludes_owner_only_authentication_fields(
+    monkeypatch: pytest.MonkeyPatch, manager: DownloadQueueManager
+) -> None:
+    import json
+
+    from unshackle.core.api import download_manager, handlers
+    from unshackle.core.approval import ApprovalNotice
+    from unshackle.core.authentication import AuthenticationObservation, AuthenticationState
+
+    monkeypatch.setattr(download_manager, "download_manager", manager)
+    job = manager.create_job("EXAMPLE", "t")
+    job.approval = ApprovalNotice("Approve this device")
+    job.authentication = AuthenticationObservation(AuthenticationState.WAITING, method="pairing")
+
+    response = await handlers.dashboard_jobs_handler(None)
+
+    snapshot = json.loads(response.text)[0]
+    assert "approval" not in snapshot
+    assert "authentication" not in snapshot
+
+
+@pytest.mark.parametrize(
+    "status, current_state, method, next_method, expected",
+    [
+        ("cancelled", "waiting", "pairing", None, {"state": "cancelled", "method": "pairing"}),
+        (
+            "failed",
+            "session_rejected",
+            "pairing",
+            None,
+            {"state": "error", "method": "pairing", "failure": "authentication_rejected"},
+        ),
+        (
+            "failed",
+            "renewing",
+            "cookies",
+            None,
+            {"state": "error", "method": "cookies", "failure": "application"},
+        ),
+        (
+            "completed",
+            "fallback",
+            "pairing",
+            "cookies",
+            {"state": "authenticated", "method": "cookies"},
+        ),
+    ],
+)
+def test_job_terminal_state_replaces_transient_authentication_observation(
+    manager: DownloadQueueManager,
+    status: str,
+    current_state: str,
+    method: str,
+    next_method: str | None,
+    expected: dict[str, str],
+) -> None:
+    from unshackle.core.api.download_manager import finalize_job_authentication
+    from unshackle.core.authentication import (
+        AuthenticationFailure,
+        AuthenticationObservation,
+        AuthenticationState,
+    )
+
+    job = manager.create_job("EXAMPLE", "t")
+    state = AuthenticationState(current_state)
+    job.authentication = AuthenticationObservation(
+        state,
+        method=method,
+        next_method=next_method,
+        failure=AuthenticationFailure.AUTHENTICATION_REJECTED if next_method else None,
+    )
+    job.status = JobStatus(status)
+
+    finalize_job_authentication(job)
+
+    assert job.authentication is not None
+    assert job.authentication.to_dict() == expected
 
 
 async def test_input_handler_rejects_bad_requests(

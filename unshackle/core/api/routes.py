@@ -1514,6 +1514,7 @@ async def download_job_input(request: web.Request) -> web.Response:
       confirmation). The job shows the prompt in its `input_prompt` field and in its SSE `progress`
       events. The job fails if nobody answers within the prompt timeout. A job that waits for an
       approval on another device shows a transient object in its `approval` field, which takes no answer.
+      Its owner-only `authentication` field reports redacted lifecycle states and fixed failure classes.
     parameters:
       - name: job_id
         in: path
@@ -2505,8 +2506,8 @@ async def session_prompt_get(request: web.Request) -> web.Response:
     """
     Poll for pending interactive prompts during authentication.
     ---
-    summary: Get auth prompt or approval
-    description: Poll for pending interactive prompts or transient device approval during remote session authentication
+    summary: Get auth prompt, approval, or lifecycle state
+    description: Poll for pending input, transient device approval, or redacted lifecycle state during authentication
     parameters:
       - name: session_id
         in: path
@@ -2534,6 +2535,28 @@ async def session_prompt_get(request: web.Request) -> web.Response:
                   properties:
                     message:
                       type: string
+                authentication:
+                  type: object
+                  nullable: true
+                  description: Redacted authentication lifecycle snapshot with no free-text fields
+                  properties:
+                    state:
+                      type: string
+                      enum: [ready, session_present, session_expired, session_rejected, renewing, repairing, fallback, waiting, authenticated, timed_out, cancelled, error]
+                    method:
+                      type: string
+                      enum: [pairing, cookies, credentials]
+                    available_methods:
+                      type: array
+                      items:
+                        type: string
+                        enum: [pairing, cookies, credentials]
+                    next_method:
+                      type: string
+                      enum: [pairing, cookies, credentials]
+                    failure:
+                      type: string
+                      enum: [authentication_rejected, entitlement, region, concurrency, network, manifest, drm, licence, application]
                 cdm_call:
                   type: object
                   additionalProperties: true
@@ -3310,7 +3333,8 @@ async def remote_logins(request: web.Request) -> web.Response:
       The caller's list calls that wait on a remote_services server's login, each with the remote
       server, service and title, and a transient `approval` object while it waits for device approval.
       Poll it alongside a remote list-titles, list-tracks or search call; a download job exposes the
-      same transient object as `approval` and clients must not retain it.
+      same transient object as `approval` and clients must not retain it. Each caller-owned login also
+      exposes a redacted `authentication` lifecycle snapshot with fixed methods and failure classes.
     responses:
       '200':
         description: Logins in progress
@@ -3343,6 +3367,10 @@ async def remote_logins(request: web.Request) -> web.Response:
                         properties:
                           message:
                             type: string
+                      authentication:
+                        type: object
+                        nullable: true
+                        description: Redacted authentication lifecycle snapshot; see the session prompt response
     """
     return await remote_logins_handler(request)
 

@@ -219,6 +219,167 @@ def test_remote_login_shows_structured_approval_instead_of_server_logs(monkeypat
     assert remote.auth_approval is None
 
 
+def test_remote_login_relays_redacted_authentication_observations(monkeypatch):
+    import logging
+    from threading import Lock
+
+    from unshackle.core.authentication import AuthenticationObservation, AuthenticationState
+
+    observed = []
+    monkeypatch.setattr(remote_service, "publish_authentication", observed.append)
+    monkeypatch.setattr(remote_service.time, "sleep", lambda seconds: None)
+    responses = iter(
+        [
+            {
+                "status": "authenticating",
+                "authentication": {"state": "session_present", "method": "pairing"},
+            },
+            {
+                "status": "authenticated",
+                "authentication": {"state": "authenticated", "method": "pairing"},
+            },
+        ]
+    )
+
+    class Client:
+        def get(self, endpoint):
+            return next(responses)
+
+        def get_optional(self, endpoint):
+            return {"logs": [], "last_seq": 0}
+
+    remote = object.__new__(remote_service.RemoteService)
+    remote.client, remote._session_id, remote._log_seq = Client(), "sid", 0
+    remote._recent_logs, remote.auth_approval, remote._log_drain_lock = [], None, Lock()
+    remote.auth_observation = None
+    remote.log, remote._cdm_sessions, remote._input_bridge = logging.getLogger("test"), {}, None
+    monkeypatch.setattr(remote_service.RemoteService, "local_cdm", None)
+
+    remote.poll_auth_completion(poll_interval=0)
+
+    assert observed == [
+        AuthenticationObservation(AuthenticationState.SESSION_PRESENT, method="pairing"),
+        AuthenticationObservation(AuthenticationState.AUTHENTICATED, method="pairing"),
+    ]
+
+
+def test_remote_login_rejects_unstructured_authentication_observation_without_echoing_it(monkeypatch):
+    import logging
+    from threading import Lock
+
+    monkeypatch.setattr(remote_service.time, "sleep", lambda seconds: None)
+
+    class Client:
+        def get(self, endpoint):
+            return {
+                "status": "authenticating",
+                "authentication": {"state": "waiting", "message": "private material"},
+            }
+
+        def get_optional(self, endpoint):
+            return {"logs": [], "last_seq": 0}
+
+    remote = object.__new__(remote_service.RemoteService)
+    remote.client, remote._session_id, remote._log_seq = Client(), "sid", 0
+    remote._recent_logs, remote.auth_approval, remote._log_drain_lock = [], None, Lock()
+    remote.auth_observation = None
+    remote.log, remote._cdm_sessions, remote._input_bridge = logging.getLogger("test"), {}, None
+    monkeypatch.setattr(remote_service.RemoteService, "local_cdm", None)
+
+    with pytest.raises(remote_service.RemoteError) as exc_info:
+        remote.poll_auth_completion(poll_interval=0)
+    assert exc_info.value.message == "Remote auth returned an invalid authentication observation"
+    assert "private material" not in exc_info.value.message
+
+
+@pytest.mark.parametrize(
+    "failure_kind, expected_state, expected_failure",
+    [
+        ("CONNECT", "error", "network"),
+        ("CANCEL", "cancelled", None),
+    ],
+)
+def test_remote_login_classifies_transport_failure_and_cancellation(
+    monkeypatch,
+    failure_kind,
+    expected_state,
+    expected_failure,
+):
+    import logging
+    from threading import Lock
+
+    from unshackle.core.authentication import AuthenticationObservation, AuthenticationState
+
+    observed = []
+    monkeypatch.setattr(remote_service, "publish_authentication", observed.append)
+
+    class Client:
+        def get(self, endpoint):
+            if failure_kind == "CANCEL":
+                raise KeyboardInterrupt
+            raise remote_service.RemoteError("Remote transport unavailable", failure_kind)
+
+        def get_optional(self, endpoint):
+            return {"logs": [], "last_seq": 0}
+
+    remote = object.__new__(remote_service.RemoteService)
+    remote.client, remote._session_id, remote._log_seq = Client(), "sid", 0
+    remote._recent_logs, remote.auth_approval, remote._log_drain_lock = [], None, Lock()
+    remote.auth_observation = AuthenticationObservation(AuthenticationState.WAITING, method="pairing")
+    remote.log, remote._cdm_sessions, remote._input_bridge = logging.getLogger("test"), {}, None
+    monkeypatch.setattr(remote_service.RemoteService, "local_cdm", None)
+
+    expected_exception = KeyboardInterrupt if failure_kind == "CANCEL" else remote_service.RemoteError
+    with pytest.raises(expected_exception):
+        remote.poll_auth_completion(poll_interval=0)
+
+    payload = observed[-1].to_dict()
+    assert payload["state"] == expected_state
+    assert payload.get("failure") == expected_failure
+    assert payload["method"] == "pairing"
+
+
+@pytest.mark.parametrize("terminal", ["timed_out", "cancelled"])
+def test_remote_login_preserves_its_session_bridges_terminal_result(monkeypatch, terminal):
+    import logging
+    from threading import Lock
+
+    from unshackle.core.api.input_bridge import InputBridge
+    from unshackle.core.authentication import AuthenticationObservation, AuthenticationState
+
+    bridge = InputBridge()
+    waiting = AuthenticationObservation(AuthenticationState.WAITING, method="pairing")
+    bridge.set_authentication_observation(waiting)
+
+    if terminal == "timed_out":
+        bridge.request_input = lambda prompt: InputBridge.request_input(bridge, prompt, timeout=0)
+        expected_exception = TimeoutError
+    else:
+        bridge.cancel()
+        expected_exception = RuntimeError
+
+    class Client:
+        def get(self, endpoint):
+            return {"status": "pending_input", "prompt": "Continue"}
+
+        def get_optional(self, endpoint):
+            return {"logs": [], "last_seq": 0}
+
+    remote = object.__new__(remote_service.RemoteService)
+    remote.client, remote._session_id, remote._log_seq = Client(), "sid", 0
+    remote._recent_logs, remote.auth_approval, remote._log_drain_lock = [], None, Lock()
+    remote.auth_observation = waiting
+    remote.log, remote._cdm_sessions, remote._input_bridge = logging.getLogger("test"), {}, bridge
+    monkeypatch.setattr(remote_service.RemoteService, "local_cdm", None)
+
+    with pytest.raises(expected_exception):
+        remote.poll_auth_completion(poll_interval=0)
+
+    assert remote.auth_observation == bridge.get_authentication_observation()
+    assert remote.auth_observation is not None
+    assert remote.auth_observation.state.value == terminal
+
+
 def test_headless_remote_login_routes_approval_through_its_session_bridge(monkeypatch):
     import logging
     from threading import Lock
@@ -256,11 +417,16 @@ def test_headless_remote_login_routes_approval_through_its_session_bridge(monkey
 async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):
     import threading as th
 
+    from unshackle.core.authentication import AuthenticationObservation, AuthenticationState
+
     class Remote:
         pass
 
     login = handlers.RemoteLogin("owner", "srv", "OTHER", "show", Remote())
     login.bridge.set_approval(ApprovalNotice("Approve this device"))
+    login.bridge.set_authentication_observation(
+        AuthenticationObservation(AuthenticationState.WAITING, method="pairing")
+    )
     monkeypatch.setattr(handlers, "_remote_logins", {login.id: login})
     monkeypatch.setattr(handlers, "is_admin", lambda request: False)
     caller = {"key": "owner"}
@@ -274,6 +440,7 @@ async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):
     listed = json.loads((await handlers.remote_logins_handler(None)).text)["logins"]
     assert listed[0]["prompt"] == "Enter the code sent to your email"
     assert listed[0]["approval"] == {"message": "Approve this device"}
+    assert listed[0]["authentication"] == {"state": "waiting", "method": "pairing"}
 
     caller["key"] = "someone-else"
     assert json.loads((await handlers.remote_logins_handler(None)).text)["logins"] == []
