@@ -523,7 +523,10 @@ def perform_download(
             log.error(f"Download exited with code {exc.code}")
             log.debug("Stdout: %s", stdout_capture.getvalue())
             log.debug("Stderr: %s", stderr_capture.getvalue())
-            raise APIError(APIErrorCode.DOWNLOAD_ERROR, f"Download failed with exit code {exc.code}")
+            captured = stderr_capture.getvalue().strip() or stdout_capture.getvalue().strip()
+            lines = [line.strip() for line in click.unstyle(captured).splitlines() if line.strip()]
+            detail = redact_all(lines[-1]) if lines else None
+            raise APIError(APIErrorCode.DOWNLOAD_ERROR, detail or f"Download failed with exit code {exc.code}")
 
     except Exception as exc:  # noqa: BLE001 - propagate to caller
         log.error(f"Download execution failed: {exc}")

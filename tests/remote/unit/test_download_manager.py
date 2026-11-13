@@ -328,6 +328,62 @@ def test_perform_download_casts_service_options(tmp_path: Path, monkeypatch: pyt
     assert exc.value.args == (2, ("a", "b"))
 
 
+@pytest.mark.parametrize(
+    ("stream", "captured", "expected"),
+    [
+        (
+            "stderr",
+            "Subtitle unavailable; continuing without subtitles.\n"
+            "\x1b[31mPlayback request rejected: https://user:pass@example.test/play?token=abc\x1b[0m",
+            "Playback request rejected: redacted",
+        ),
+        ("stdout", "Provider refused this episode", "Provider refused this episode"),
+        (None, "", "Download failed with exit code 1"),
+    ],
+)
+def test_perform_download_keeps_a_safe_system_exit_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: str | None,
+    captured: str,
+    expected: str,
+) -> None:
+    import sys
+
+    import click
+
+    import unshackle.commands.dl as dl_module
+    from unshackle.core.api import download_manager, handlers
+    from unshackle.core.api.errors import APIError, APIErrorCode
+    from unshackle.core.services import Services
+
+    class FakeDl:
+        cli = dl_module.dl.cli
+
+        def __init__(self, ctx: click.Context, **kwargs: object) -> None:
+            pass
+
+        def result(self, **kwargs: object) -> None:
+            if stream:
+                print(captured, file=getattr(sys, stream))
+            raise SystemExit(1)
+
+    class FakeService:
+        def __init__(self, ctx: click.Context) -> None:
+            pass
+
+    monkeypatch.setattr(dl_module, "dl", FakeDl)
+    monkeypatch.setattr(Services, "get_path", staticmethod(lambda service: tmp_path))
+    monkeypatch.setattr(Services, "load", staticmethod(lambda service: FakeService))
+    monkeypatch.setattr(handlers, "load_full_cdm", lambda *args: None)
+
+    with pytest.raises(APIError) as exc_info:
+        download_manager.perform_download("job-1", "EXAMPLE", "t1", {})
+
+    assert exc_info.value.error_code is APIErrorCode.DOWNLOAD_ERROR
+    assert exc_info.value.message == expected
+
+
 def test_worker_relays_a_prompt_and_reads_the_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     import json
     import os
