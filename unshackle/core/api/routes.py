@@ -957,7 +957,7 @@ async def download(request: web.Request) -> web.Response:
                   - type: array
                     items:
                       type: string
-                description: Audio codec(s) to download (e.g., "AAC" or ["AAC", "EC3"]) - accepts AAC, AC3, DD, EC3, DD+, EAC3, DDP, AC4, AC-4, OPUS, OGG, VORB, VORBIS, DTS, DTSX, DTS-X, DTSHD, DTS-HD, MPEGH, MPEG-H, ALAC, FLAC, MP3 (default - [])
+                description: Audio codec(s) to download (e.g., "AAC" or ["AAC", "EC3"]) - accepts AAC, AC3, DD, EC3, DD+, EAC3, DDP, AC4, AC-4, OPUS, OGG, VORB, VORBIS, DTS, DTSX, DTS-X, DTSHD, DTS-HD, MPEGH, MPEG-H, AV3A, Audio Vivid, ALAC, FLAC, MP3 (default - [])
               vbitrate:
                 type: integer
                 description: Video bitrate in kbps (default - None)
@@ -969,7 +969,7 @@ async def download(request: web.Request) -> web.Response:
                 items:
                   type: string
                 description: >-
-                  Video colour range (SDR, HDR10, HDR10+, HLG, DV, HYBRID) (default - ["SDR"]).
+                  Video colour range (SDR, HDR10, HDR10+, VIVID, HLG, DV, HYBRID) (default - ["SDR"]).
                   An API key with a server_cdm_max_height for the service cannot set HYBRID.
               channels:
                 type: number
@@ -1008,22 +1008,25 @@ async def download(request: web.Request) -> web.Response:
                 type: array
                 items:
                   type: string
-                description: Language for subtitle tracks (a '-' prefix excludes, e.g. ["all", "-es"]) (default - ["all"])
+                description: Language for subtitle tracks (a '-' prefix excludes, e.g. ["all", "-es"]); a missing one is skipped with a warning (default - ["all"])
               require_audio:
                 type: array
                 items:
                   type: string
-                description: Audio languages that must exist, else the job fails (default - [])
+                description: Audio languages that must exist, else the job fails or, with skip_missing, skips the title (default - [])
               require_video:
                 type: array
                 items:
                   type: string
-                description: Video languages that must exist, else the job fails (default - [])
+                description: Video languages that must exist, else the job fails or, with skip_missing, skips the title (default - [])
               require_subs:
                 type: array
                 items:
                   type: string
-                description: Required subtitle languages (default - [])
+                description: Subtitle languages that must exist, else the job fails or, with skip_missing, skips the title (default - [])
+              skip_missing:
+                type: boolean
+                description: Skip a title that misses a required language or track and continue with the next title; the job fails when it skips every title (default - false)
               forced_subs:
                 type: boolean
                 description: Include forced subtitle tracks (default - false)
@@ -1041,6 +1044,9 @@ async def download(request: web.Request) -> web.Response:
               sub_format:
                 type: string
                 description: Output subtitle format such as SRT or VTT, or "original" to keep the source format (default - None)
+              sub_font:
+                type: string
+                description: Font for subtitles converted to ASS, implies sub_format ASS (default - None)
               video_only:
                 type: boolean
                 description: Only download video tracks (default - false)
@@ -1169,8 +1175,10 @@ async def download(request: web.Request) -> web.Response:
               generate_dv:
                 type: boolean
                 description: >-
-                  With HYBRID in range, make Dolby Vision from the HDR10+ metadata when a title has no
-                  Dolby Vision track (default - false). Needs hdr10plus_tool on the server.
+                  With HYBRID in range, make Dolby Vision from the HDR10+ metadata or the decoded video
+                  when a title has no Dolby Vision track (default - false). With HDR10 or HDR10P in range
+                  and no HYBRID, make it for that base and ignore a Dolby Vision track. With none of the
+                  three in range, the field has no effect.
               worst:
                 type: boolean
                 description: Select the lowest bitrate track within the specified quality. Requires `quality` (default - false)
@@ -1187,6 +1195,9 @@ async def download(request: web.Request) -> web.Response:
                 type: string
                 enum: [official, dvd, absolute, alternate, regional]
                 description: Renumber episodes to a TVDB season order (default - the tvdb_order config option)
+              continuous_episodes:
+                type: boolean
+                description: Number each season on from the season before it, e.g. S02E05 after a four-episode season one (default - false)
               output_dir:
                 type: string
                 description: >
@@ -2080,7 +2091,9 @@ async def tunnel(request: web.Request) -> web.StreamResponse:
     description: >-
       A WebSocket that a --remote client holds open. The server sends the requests of a remote session
       created with proxy tunnel:<id> through it, and the client makes them from its own connection.
-      The first message is {"id": <tunnel id>}.
+      The first message is {"id": <tunnel id>}. A client that has finished closes with code 1000,
+      which frees the tunnel at once; after any other close the tunnel waits 60 seconds for a reconnect.
+      An API key with shared: true counts its tunnels for each X-Client-Id value, which its gateway sets.
     parameters:
       - name: id
         in: query
@@ -2094,7 +2107,9 @@ async def tunnel(request: web.Request) -> web.StreamResponse:
       '404':
         description: No open tunnel with this id for this API key
       '429':
-        description: The API key has the maximum number of tunnels open
+        description: >-
+          The API key has the maximum number of tunnels open, or, with a Retry-After header,
+          the API key is over its hourly request limit
     """
     return await tunnel_handler(request)
 

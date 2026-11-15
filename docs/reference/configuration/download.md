@@ -38,9 +38,10 @@ Common config keys. This is a useful subset, and every `dl` flag works:
 | `quality` | list | `[]` (best) | Resolution(s), e.g. `[1080]`. |
 | `vcodec` | list | `[]` (any) | Video codec(s), e.g. `[H265]`. |
 | `acodec` | list | `[]` (any) | Audio codec(s), e.g. `[EC3]`. |
-| `range` | list | `["SDR"]` | Colour range(s): `SDR`, `HLG`, `HDR10`, `HDR10P`, `DV`, `HYBRID`. |
+| `range` | list | `["SDR"]` | Colour range(s): `SDR`, `HLG`, `HDR10`, `HDR10P`, `VIVID`, `DV`, `HYBRID`. |
 | `channels` | float | *(unset)* | Audio channels, e.g. `6` for 5.1. |
 | `sub_format` | str | *(unset)* | Convert subtitles to this format (`srt`, `vtt`, `original`, ...). |
+| `sub_font` | str | *(unset)* | Font for subtitles converted to ASS; implies `sub_format: ass`. Ignored when `sub_format` is another format. |
 | `forced_subs` | bool | `false` | Include forced subtitle tracks. |
 | `forced_s_lang` | list | `[]` | Forced subtitle language(s); implies `forced_subs`. A `-` prefix excludes. |
 | `forced_subs_only` | bool | `false` | Keep only forced subtitle tracks; implies `forced_subs`. |
@@ -51,8 +52,9 @@ Common config keys. This is a useful subset, and every `dl` flag works:
 | `workers` | int | *(downloader default)* | Threads per track. |
 | `speed_limit` | str | *(unlimited)* | Total download speed cap across all downloads combined, e.g. `500k`, `5M`, `1.5G` or plain bytes/sec. Values are bytes, not bits (`5M` = 5.0 MB/s). |
 | `slow` | str | *(unset)* | Inter-title delay, e.g. `"20-40"`. |
-| `best_available` | bool | `false` | Warn instead of failing when a requested resolution, range, or language is missing, or when one DRM system does not license under `--all-drm`. The CLI flag is `--best-available`, also spelled `--warn-only`. |
-| `generate_dv` | bool | `false` | With `-r HYBRID`, make Dolby Vision from the HDR10+ metadata when a title has no DV track. Needs `hdr10plus_tool`. See [Dolby Vision from HDR10+](../../guide/downloading.md#dolby-vision-from-hdr10). |
+| `best_available` | bool | `false` | Warn instead of failing when a requested resolution, range, video language, or audio language is missing, or when one DRM system does not license under `--all-drm`. The CLI flag is `--best-available`, also spelled `--warn-only`. |
+| `skip_missing` | bool | `false` | Skip a title that misses a required language (`require_audio`, `require_video`, `require_subs`) or a track that a filter asks for, and continue with the next title. A run with one title, or a run that skips every title, still fails. The CLI flag is `--skip-missing`. For REST API jobs, set it in the [`serve`](services.md#serve) block. |
+| `generate_dv` | bool | `false` | With `-r HYBRID`, make Dolby Vision from the HDR10+ metadata or the decoded video when a title has no DV track. With `-r HDR10` or `-r HDR10P`, make it for that base and ignore a DV track. See [Dolby Vision without a DV track](../../guide/downloading.md#dolby-vision-without-a-dv-track). |
 | `proxy` | str | *(unset)* | Default proxy URI or 2-letter country. |
 | `no_folder` | bool | `false` | Do not create a per-title folder. |
 
@@ -194,6 +196,7 @@ in or writes them as sidecar files. See [Subtitles](../../guide/subtitles.md) fo
 | `type_priority` | list | *(unset)* | Ordered ranking of subtitle types (`forced`, `normal`, `sdh`; CC counts as SDH). Types you leave out fall to the end. |
 | `group_by` | str | `"type"` | Which key groups the subtitle tracks. `type` puts all forced tracks together, then all normal, then all SDH. `language` keeps each language next to its own variants. |
 | `language_priority` | list | *(unset)* | Languages to sort to the top, in the order you give. The rest keep the default order: original language first, then alphabetical. Nothing is removed. |
+| `ass_style` | dict | *(unset)* | Style for subtitles converted to ASS, as pysubs2 or ASS style fields (`fontname`, `fontsize`, `primarycolor` or `PrimaryColour`, ...) for a 1080-line picture. Makes ASS the output format when `sub_format` is unset. See [Custom font and style](../../guide/subtitles.md#custom-font-and-style). |
 | `dedupe_codecs` | list | *(unset)* | Subtitle codecs in order of preference, by value or name, for example `[VTT, STPP, WVTT]`. When tracks of the same language, forced/SDH/CC type and name come in several listed codecs, unshackle drops the ones in a later codec. It always keeps codecs you leave out. Unset keeps every track. |
 
 ```yaml
@@ -236,20 +239,24 @@ subtitle:
     `en-GB` falls to the alphabetical tail with the rest. Name each tag you want when you use
     that flag.
 
-!!! note "`type_priority` picks the default subtitle only with `muxing.default_language`"
+!!! note "`type_priority` alone does not pick the default subtitle"
     At mux time the `default` flag goes to every forced subtitle whose language matches the
-    first audio track, so a full dialogue track never becomes default on its own.
-    `type_priority` alone does not change that. Name a subtitle language in
-    [`muxing.default_language`](#muxing) and the first track in that language gets the flag
-    instead, which is where `type_priority` decides which track that is:
+    default audio track, so a full dialogue track never becomes default on its own.
+    `type_priority` changes the order of the tracks in the file. It decides the flag only
+    between the tracks of one language, when you set `muxing.default_language.subtitle`. Set
+    [`muxing.default_subtitle_type`](#muxing) to name the type that gets the flag:
 
     ```yaml
     muxing:
+      default_subtitle_type: [normal, sdh, forced]
       default_language:
         subtitle: en
-    subtitle:
-      type_priority: [normal, sdh, forced]
     ```
+
+    Here the flag goes to the full English track, then to the English SDH track when the
+    title has no full one, then to the forced one. Without `default_language.subtitle`, the
+    first track of the type in file order gets the flag, in any language. A forced track is
+    the exception: it gets the flag only in the language of the default audio track.
 
 ## `audio`
 
@@ -287,6 +294,7 @@ Matroska (MKV) muxing options.
 |---------|------|---------|-------------|
 | `set_title` | bool | `true` | Write a human-readable title into the MKV container. |
 | `default_language` | dict | `{}` | Force which language is flagged *default* per track type, e.g. `{audio: en, subtitle: en}`. A tag with a region, such as `en-US`, matches only that variant. |
+| `default_subtitle_type` | str or list | unset | The subtitle types that can take the *default* flag, in order: `forced`, `normal`, `sdh` (CC counts as SDH, and `cc` is the same as `sdh`). The first subtitle track of the first type that the title has gets the flag. With `default_language.subtitle`, only the tracks in that language count. unshackle ignores a different word with a warning. `normal` is the value for players that read the forced flag. Read [Muxing](../../guide/output-and-naming.md#muxing-options). |
 | `merge_audio` | bool | `true` | Merge all audio into one file. `--split-audio` on the CLI flips this off. |
 | `merge_video` | bool | `false` | Merge video tracks that share height, range, and codec into one file, so only language varies inside a file. `--merge-video` on the CLI flips this on. |
 | `track_names` | str | `english` | The language of the name unshackle gives a track that the service left unnamed: `english` (`Chinese (Traditional)`), `native`, the name in the language itself (`中文（繁體）`), or `none`, which leaves the track unnamed. Read [Track names and language tags](../../guide/output-and-naming.md#track-names-and-language-tags). |
@@ -300,6 +308,7 @@ muxing:
   default_language:
     audio: en
     subtitle: en
+  default_subtitle_type: normal
 ```
 
 ## `language_tags`
@@ -407,7 +416,7 @@ dual_multi_mode: strict
 Find the HDR10+ tracks that a service labels as HDR10. Before unshackle lists or selects tracks, it
 reads the first fragment of HEVC HDR10 tracks from DASH, HLS fMP4 and one-file sources. A track
 whose first frame carries HDR10+ (SMPTE ST 2094-40) metadata becomes `HDR10P`. Then `-r HDR10P`,
-`--list` and [`--generate-dv`](../../guide/downloading.md#dolby-vision-from-hdr10) use it.
+`--list` and [`--generate-dv`](../../guide/downloading.md#dolby-vision-without-a-dv-track) use it.
 
 unshackle also probes HEVC Dolby Vision tracks. A DV track that carries HDR10+ keeps its `DV`
 range, so `-r DV` selects it, and `--list` shows it as `DV+HDR10P`. `-r HYBRID` uses it as the
@@ -423,6 +432,13 @@ probes the two highest and the two lowest bitrates first:
 | All four carry HDR10+ | Every HDR10 track of the title becomes `HDR10P`. |
 | Some carry HDR10+ | The title has HDR10 and HDR10+ encodes side by side, so unshackle probes every track. |
 | None carry HDR10+ | Every track stays `HDR10`. |
+
+The probe also finds HDR Vivid in HEVC HDR10 and HLG tracks. A track becomes `VIVID`, so
+`-r VIVID` selects it, when its first frame carries CUVA HDR Vivid metadata, or when its MPEG-TS
+program map table (PMT) has the `cuvv` registration. An HLG track never becomes `HDR10P`. An audio
+track with no codec gets its codec from the PMT of an MPEG-TS first segment: the `AVSA`
+registration or `stream_type` `0xD5` gives `Audio Vivid`. The probe has no HDR10+ result for an
+MPEG-TS track.
 
 A probe that fails, or a fragment whose metadata is encrypted, keeps the label from the service.
 unshackle does not probe ISM tracks. Each probe makes one to three small requests: the 64 KiB
@@ -440,7 +456,7 @@ remote downloads and to the REST API.
 
 - **Type:** `str` &nbsp;·&nbsp; **Default:** `v29`
 
-How [`--generate-dv`](../../guide/downloading.md#dolby-vision-from-hdr10) sets the Level 1 brightness
+How [`--generate-dv`](../../guide/downloading.md#dolby-vision-without-a-dv-track) sets the Level 1 brightness
 values of the Dolby Vision it makes from HDR10+. All modes make one shot per HDR10+ scene and keep the
 same peak and letterbox area. They differ in the scene average, which the TV uses to tone-map.
 
@@ -453,6 +469,9 @@ same peak and letterbox area. They differ in the scene average, which the TV use
 ```yaml
 generate_dv_mode: v29
 ```
+
+Dolby Vision that unshackle measures from the decoded video uses its measured average in all modes.
+`v40` raises the lowest average to about 10 nits, and `legacy` is the same as `v29`.
 
 The setting applies on the machine that runs the hybrid step: the client for a remote download, the
 server for a REST API job.

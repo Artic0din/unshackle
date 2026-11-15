@@ -97,7 +97,7 @@ By default a missing requested resolution is an error. Two flags change that:
 
 | Flag | Behaviour |
 | --- | --- |
-| `--best-available` (`--warn-only`) | If the requested resolution(s) are not present, continue with the best that *is* available instead of failing. Also softens missing video/audio/subtitle languages and hybrid fallbacks, and with `--all-drm` a DRM system that does not license. |
+| `--best-available` (`--warn-only`) | If the requested resolution(s) are not present, continue with the best that *is* available instead of failing. Also softens missing video and audio languages and hybrid fallbacks, and with `--all-drm` a DRM system that does not license. |
 | `--worst` | Within the specified quality, pick the **lowest** bitrate rendition. **Requires `-q/--quality`.** |
 
 ```shell title="Never fail on a missing resolution"
@@ -142,6 +142,7 @@ unshackle dl -v hevc,avc EXAMPLE 81234567
 | `HLG` | Hybrid Log-Gamma |
 | `HDR10` | HDR10 |
 | `HDR10P` | HDR10+ (`-r HDR10+` also works) |
+| `VIVID` | HDR Vivid (`-r "HDR Vivid"` also works) |
 | `DV` | Dolby Vision |
 | `HYBRID` | Fetch both an HDR10/HDR10+ base and a DV track, then merge them |
 
@@ -164,6 +165,10 @@ unshackle dl -q 2160 -r HDR10,DV EXAMPLE '...'
 
 The output file of a track with a Dolby Vision profile 8 RPU plays as Dolby Vision on a DV screen.
 
+`--list` adds `3D` to a stereoscopic 3D (MV-HEVC) track, for example `[H.265, DV, 3D]`. When a title
+has a 2D and a 3D track at the same resolution, unshackle selects the 2D track. A 3D title muxes to
+MP4, see [3D output](output-and-naming.md#3d-output).
+
 !!! warning "HYBRID requires dovi_tool"
     `-r HYBRID` makes a single hybrid track by injecting the Dolby Vision RPU
     metadata onto an HDR10/HDR10+ base layer with **dovi_tool**.
@@ -185,17 +190,35 @@ The output file of a track with a Dolby Vision profile 8 RPU plays as Dolby Visi
     To keep an HDR10+ deliverable *alongside* the hybrid, request both ranges:
     `-r HYBRID,HDR10P`. `-r HYBRID` on its own muxes only the merged hybrid.
 
-#### Dolby Vision from HDR10+
+#### Dolby Vision without a DV track
 
-When a title has HDR10+ but no DV track, `-r HYBRID --generate-dv` makes a Dolby Vision
-Profile 8.1 track from the HDR10+ metadata. It needs `hdr10plus_tool` as well as `dovi_tool`.
-When a title has a DV track, unshackle uses that track and ignores the flag. When it has none,
-the flag also makes unshackle ask the service for its HDR10+ tracks. A track that the service labels HDR10 but
-that carries HDR10+ metadata also qualifies (see [`hdr10plus_probe`](../reference/configuration/download.md#hdr10plus_probe)).
+When a title has no DV track, `-r HYBRID --generate-dv` makes a Dolby Vision Profile 8.1 track
+for its HDR10 or HDR10+ base. When a title has a DV track, unshackle uses that track and ignores
+the flag. When it has none, the flag also makes unshackle ask the service for its HDR10+ tracks.
 
-```shell title="Generate Dolby Vision from HDR10+, and keep the HDR10+ file too"
+| Base | Source of the Dolby Vision brightness values |
+| --- | --- |
+| HDR10+, with `hdr10plus_tool` installed | The HDR10+ metadata |
+| HDR10, or HDR10+ without `hdr10plus_tool`, or an HDR10+ label with no metadata in the track | The decoded video |
+
+A track that the service labels HDR10 but that carries HDR10+ metadata counts as HDR10+
+(see [`hdr10plus_probe`](../reference/configuration/download.md#hdr10plus_probe)).
+
+```shell title="Generate Dolby Vision, and keep the HDR10+ file too"
 unshackle dl -q 2160 -r HYBRID,HDR10P --generate-dv EXAMPLE '...'
 ```
+
+To generate Dolby Vision for one base when the title has a DV track, name the base and not `HYBRID`:
+`-r HDR10 --generate-dv` or `-r HDR10P --generate-dv`. unshackle then ignores the DV track and writes
+only the hybrid of that base. The DV track of the service is better than generated Dolby Vision,
+so prefer `-r DV` or `-r HYBRID` when the title has one. With `DV` also in `-r`, unshackle shows a
+warning, ignores the flag and downloads the ranges as usual.
+
+```shell title="Generate Dolby Vision from the HDR10 track alone"
+unshackle dl -q 2160 -r HDR10 --generate-dv EXAMPLE '...'
+```
+
+##### From HDR10+ metadata
 
 Each HDR10+ scene becomes one Dolby Vision shot, with its own scene cut and its own Level 1
 brightness values (peak and average). unshackle calculates the average itself, as a PQ mean of
@@ -207,6 +230,21 @@ The [`generate_dv_mode`](../reference/configuration/download.md#generate_dv_mode
 `unshackle.yaml` changes how the average is set: `v29` (default), `v40` for the 10-nit floor of studio
 Dolby Vision, or `legacy` for the `dovi_tool` average.
 
+##### From the decoded video
+
+For a base with no HDR10+ metadata, FFmpeg decodes the whole HDR10 track and unshackle measures
+each frame inside the letterbox bars. Each scene cut that FFmpeg detects starts one Dolby Vision
+shot, and a shot is at least half a second long. The Level 1 values of a shot are the minimum, the
+peak and the mean brightness of its frames. The peak is the brightest small area of the picture
+(1/32 of its width), not one pixel, which is how studio Dolby Vision reads. `dovi_tool` keeps the
+minimum at 0.0003 nits or below and the peak at 100 nits or above. When the track states no MaxCLL
+or MaxFALL, the Level 6 values come from the same measurement, so they are lower than values
+measured for each pixel.
+
+!!! note "The measurement decodes the whole title"
+    A 2160p film takes about 10 minutes on a fast CPU, because every frame is decoded once. The
+    download and the HDR10 track are not changed.
+
 !!! warning "Generated Dolby Vision is not studio Dolby Vision"
     - There are no colourist trims (Level 2 and Level 8). The TV does all the tone mapping
       from the Level 1 values.
@@ -214,14 +252,11 @@ Dolby Vision, or `legacy` for the `dovi_tool` average.
       `generate_dv_mode: v40`), so a very dark scene reads a little brighter than its pixels.
     - The HDR10+ tone-mapping curve (Profile B) has no Dolby Vision equivalent. The HDR10+
       metadata stays in the file, so an HDR10+ TV still reads it.
-    - The result can be no better than the HDR10+ metadata. Profile A metadata is often less
-      reliable than Profile B, and unshackle shows a warning for Profile A.
+    - Dolby Vision from HDR10+ can be no better than the HDR10+ metadata. Profile A metadata is
+      often less reliable than Profile B, and unshackle shows a warning for Profile A.
     - A TV or player that supports both formats almost always picks Dolby Vision. On such a
       TV, the generated Dolby Vision replaces the original HDR10+. To keep the original, also
       request `HDR10P`, as in the example above.
-
-    An HDR10 track that a service labels HDR10 but that carries HDR10+ metadata does not
-    convert. Only a track with the `HDR10P` range does.
 
 ## Bitrate selection
 
@@ -286,6 +321,7 @@ bitrate for the top renditions, overriding the manifest value:
 | `DTSX` | `DTS-X` | DTS:X Profile 2 (DTS-UHD) |
 | `DTSHD` | `DTS-HD` | DTS-HD High Resolution, Master Audio and Express |
 | `MPEGH` | `MPEG-H` | MPEG-H 3D Audio |
+| `AV3A` | `Audio Vivid` | Audio Vivid (AVS3-P3) |
 | `ALAC` | `ALAC` | Apple Lossless |
 | `FLAC` | `FLAC` | FLAC |
 | `MP3` | `MP3` | MPEG-1 Audio Layer III |
@@ -421,7 +457,8 @@ selects `pt-BR`. If the title has no such variant, the tag takes every regional 
 
 A tag with a region asks for that variant only: `-l es-419` selects `es-419`, never `es-ES`
 or `es-MX`. If the service has no `es-419` track, unshackle reports `es-419 not found` and
-stops. With `--best-available`, it continues with the other languages.
+stops. With `--best-available`, it continues with the other languages. A missing `-sl`
+language always gives a warning and the download continues; `--require-subs` makes it fail.
 
 A track without a region matches only the region its language implies. `en` is US English
 and `pt` is Brazilian Portuguese, so `-l en-US` accepts a track tagged `en`, but `-l en-GB`
@@ -495,6 +532,17 @@ unshackle dl -l en,fr --require-audio en --warn-only EXAMPLE 0ABC123
 The check runs against the full track list, before any language selection or exclusion.
 `orig` resolves to the title language, and `--exact-lang` applies. Audio carried inside the
 video track counts. `--no-audio` and `--no-video` drop the matching requirement.
+
+A failed title stops the whole run. To skip that title and come back for it later, add
+`--skip-missing`, or set `skip_missing: true` under `dl:` in `unshackle.yaml`. It also skips a
+title that has no track for a filter such as `-q`, `-v`, `-r`, `-a` or a language you request.
+A run with one title, or a run that skips every title, still fails. A REST API job lists each
+skipped title and the reason in `skipped_titles`.
+
+```bash
+# download the episodes that have Korean audio, skip the others
+unshackle dl -al ko,en --require-audio ko --skip-missing -w S06 EXAMPLE 0ABC123
+```
 
 ### Forced subtitles and output format
 
@@ -742,7 +790,8 @@ Additional track-type flags:
     - A flag that drops the same tracks is an error, for example `-ado` with `--no-audio`
       or `-fso` with `-A`.
     - A title with no track of that kind stops a run of one title. A run of more than one
-      title skips that title with a warning and continues.
+      title skips that title with a warning and continues. The run fails when it skips
+      every title.
     - unshackle reads the kind from the manifest or from the service. A track that
       neither of them marks as descriptive or forced does not match.
 
@@ -818,8 +867,8 @@ By default, `mkvmerge` muxes the tracks of a movie or an episode into a single M
     window, or the whole file when the track is one file.
 
 !!! note "Music is never muxed"
-    A song skips the muxer. unshackle keeps the container that the service
-    delivered, such as `.flac`, `.m4a`, or `.mp3`, and writes the metadata into that file.
+    A song skips the muxer. unshackle remuxes it into the container of its codec,
+    such as `.flac`, `.m4a`, or `.mp3`, and writes the metadata into that file.
     Read [Music output files](output-and-naming.md#music-output-files).
 
 ### After the download
@@ -827,7 +876,8 @@ By default, `mkvmerge` muxes the tracks of a movie or an episode into a single M
 `--postscript "<command>"` runs your own command once per output file, with unshackle's
 metadata substituted into `{variable}` placeholders. It is repeatable, and it replaces the
 `post_scripts` config for that run. No `success` post-script operates under `--no-mux`, because
-that run writes no muxed output. A `failure` post-script still operates if the download fails.
+that run writes no muxed output; a song is the exception, because `--no-mux` does not apply to it.
+A `failure` post-script still operates if the download fails.
 
 ```shell title="Hand each finished file to an uploader"
 unshackle dl --postscript "python /opt/upload.py {filepath} --service={service}" EXAMPLE 81234567
@@ -1016,6 +1066,7 @@ lookups but keep the IDs you give, set
 | `--anilist` | `--anilist 21` | Use this AniList ID instead of an automatic search. `mal:12345` is also accepted. Needs no API key. |
 | `--enrich` | - | Overwrite the show title, year and original language with the external source's. **Requires** one of `--tmdb`, `--imdb`, `--tvdb`, or `--anilist`. |
 | `--tvdb-order` | `--tvdb-order dvd` | Renumber episodes to a TVDB season order. Needs `tvdb_api_key`. |
+| `-ce` / `--continuous-episodes` | - | Number each season on from the season before it, so season two starts at `S02E05` after four episodes. |
 
 ```shell title="Force the right IMDb match, and keep the service's own naming"
 unshackle dl --imdb tt1375666 EXAMPLE 81234567
@@ -1117,6 +1168,23 @@ Available orders are `official` (aired), `dvd`, `absolute`, `alternate`, and `re
     two episodes the same season/episode slot, and so the same filename, unshackle logs an
     error and leaves the numbering untouched. Pick an order that covers the whole series.
 
+### Continuous episode numbers
+
+Some anime release groups number each season on from the season before it. With
+`--continuous-episodes`, a season two that follows a four-episode season one starts at
+`S02E05`:
+
+```shell title="Number season two on from season one"
+unshackle dl -ce EXAMPLE 81234567
+```
+
+The count comes from the episodes the service lists, so download from the series URL, not
+from a single season. A season the service does not list in your region is not counted.
+Season 0 and episode 0 keep their numbers, and a season that already starts past the
+season before it is not changed. The renumbering runs before `--wanted`, so select episodes
+by their new numbers, for example `-w S02E05`. A whole-season selection such as `-w S05`
+matches episodes up to E999 only.
+
 ## Configuration defaults
 
 You can set every flag on this page as a default in your configuration file so you do not
@@ -1149,6 +1217,7 @@ authoritative list.
 | `--forced-subs` | `-fs` | Include forced subtitles. |
 | `--forced-s-lang` | `-fsl` | Forced subtitle language(s); implies `-fs`. `-` excludes. |
 | `--sub-format` | | Output subtitle format. |
+| `--sub-font` | | Font for subtitles converted to ASS; implies `--sub-format ASS`. |
 | `--wanted` | `-w` | Episode/season range, an air date, or a track number for a music release (`1-5`, `2x3`). |
 | `--daily` | | Fill missing air dates from TVDB during `--enrich`. |
 | `--select-titles` | | Interactively pick episodes or films. |
@@ -1160,6 +1229,7 @@ authoritative list.
 | `--require-audio` | | Audio languages that must exist. The title fails if one is missing. |
 | `--require-video` | | Video languages that must exist. The title fails if one is missing. |
 | `--best-available` | | Degrade gracefully instead of failing. |
+| `--skip-missing` | | Skip a title that misses a required language or track, and continue with the next title. |
 | `--output` | `-o` | Output directory for this run. |
 | `--split-audio` / `--merge-video` / `--no-mux` | | Muxing behaviour. |
 | `--postscript` / `--no-postscript` | | Run a command after each output file, or run none. |
@@ -1171,3 +1241,4 @@ authoritative list.
 | `--export` | | Export track info and keys to JSON. |
 | `--tmdb` / `--imdb` / `--tvdb` / `--anilist` / `--enrich` | | Metadata overrides. |
 | `--tvdb-order` | | Renumber episodes to a TVDB season order. |
+| `-ce` / `--continuous-episodes` | | Number each season on from the season before it. |

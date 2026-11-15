@@ -79,12 +79,12 @@ unshackle dl [OPTIONS] SERVICE [SERVICE ARGS...]
 | `-ab`, `--abitrate` | highest | Exact audio bitrate in kbps. |
 | `-vb-range`, `--vbitrate-range` | - | Video bitrate range in kbps, e.g. `6000-7000`; picks highest within. Mutually exclusive with `--vbitrate`. |
 | `-ab-range`, `--abitrate-range` | - | Audio bitrate range in kbps, e.g. `128-256`. Mutually exclusive with `--abitrate`. |
-| `-r`, `--range` | `SDR` | Colour range(s): `SDR`, `HLG`, `HDR10`, `HDR10P` (HDR10+), `DV`, `HYBRID`. |
-| `--generate-dv` | off | With `-r HYBRID`, make Dolby Vision from the HDR10+ metadata when a title has no Dolby Vision track. Needs `hdr10plus_tool`. See [Dolby Vision from HDR10+](downloading.md#dolby-vision-from-hdr10). |
+| `-r`, `--range` | `SDR` | Colour range(s): `SDR`, `HLG`, `HDR10`, `HDR10P` (HDR10+), `VIVID` (HDR Vivid), `DV`, `HYBRID`. |
+| `--generate-dv` | off | With `-r HYBRID`, make Dolby Vision from the HDR10+ metadata or the decoded video when a title has no Dolby Vision track. With `-r HDR10` or `-r HDR10P`, make it for that base and ignore a Dolby Vision track. See [Dolby Vision without a DV track](downloading.md#dolby-vision-without-a-dv-track). |
 | `-c`, `--channels` | - | Audio channels; matches sub-layouts (5.1 ≈ 6.0). |
 | `-naa`, `--noatmos` | off | Exclude Dolby Atmos audio tracks. |
 | `--worst` | off | Pick the lowest bitrate within the requested quality. **Requires `-q`.** |
-| `--best-available`, `--warn-only` | off | Warn and continue when a requested resolution, range, or language is absent, instead of failing. With `--all-drm`, also when one DRM system does not license. |
+| `--best-available`, `--warn-only` | off | Warn and continue when a requested resolution, range, video language, or audio language is absent, instead of failing. With `--all-drm`, also when one DRM system does not license. |
 | `-rvb`, `--real-video-bitrate` | off | Probe real media size for true video bitrates, overriding the manifest. |
 | `-rab`, `--real-audio-bitrate` | off | Same for audio (slower). |
 
@@ -102,11 +102,13 @@ unshackle dl [OPTIONS] SERVICE [SERVICE ARGS...]
 | `--require-audio` | - | Audio langs that must exist. The title fails even with `--best-available`. Does not select tracks. |
 | `--require-video` | - | Video langs that must exist. The title fails even with `--best-available`. Does not select tracks. |
 | `--require-subs` | - | Subtitle langs that must exist. Fails the title if one is missing. `--s-lang` still decides what to keep. |
+| `--skip-missing` | off | Skip a title that misses a required language or track, and continue with the next title. A run with one title, or a run that skips every title, still fails. |
 | `-fs`, `--forced-subs` | off | Include forced subtitle tracks. |
 | `-fso`, `--forced-subs-only` | off | Keep only forced subtitle tracks; drop the other subtitles. Implies `-fs`. |
 | `-fsl`, `--forced-s-lang` | none | Language(s) wanted for forced subtitles; implies `-fs`. A `-` prefix excludes. |
 | `--exact-lang` | off | A tag without a region selects only the variant it means and never falls back to another: `-l es` does not select `es-419`. A tag with a region, such as `es-419`, is always exact. Applies to selection and to sort order. |
 | `--sub-format` | - | Output subtitle format (`SRT`/`srt`, `VTT`/`webvtt`, `ASS`/`ssa`, `TTML`, `SMI`, ...), or `original` to keep the source format. |
+| `--sub-font` | - | Font for subtitles converted to ASS, with the rest of the look from `subtitle.ass_style`. Implies `--sub-format ASS` and overrides a `sub_format` from the configuration file; a typed `--sub-format` of another format is an error. |
 
 !!! tip "These flags select languages, they do not order them"
     Naming languages with `-l` or `-sl` removes the others. To keep every language but put
@@ -172,6 +174,7 @@ Keep only certain track types, or skip certain track types.
 | `--enrich` | Overwrite show title, year and original language with the external source's. **Requires** one of `--tmdb`, `--imdb`, `--tvdb`, or `--anilist`. |
 | `--daily` | Treat the title as daily/date-based content and fill missing episode air dates from TVDB. The fill needs `--enrich` and a TVDB ID. See [Daily and date-based content](downloading.md#daily-and-date-based-content). |
 | `--tvdb-order` | Renumber episodes to a TVDB season order: `official` (aired), `dvd`, `absolute`, `alternate`, or `regional`. Needs `tvdb_api_key`. |
+| `-ce` / `--continuous-episodes` | Number each season on from the season before it. After a season one of four episodes, season two starts at `S02E05`. Season 0 and episode 0 keep their numbers. |
 
 !!! note "One ID at a time"
     You cannot combine `--tmdb`, `--imdb` and `--tvdb`. Give one and unshackle finds the
@@ -207,7 +210,7 @@ order the service used, then renumbers the episodes into the order you asked for
 | Flag | Description |
 |---|---|
 | `--proxy` | Proxy URI, a country or location code resolved from configured providers, or `provider:region` (e.g. `nordvpn:ca`, `gluetun:us`, `protonvpn:de:berlin`, `controld:yul`). |
-| `--local-proxy` | With `--remote`, send the server's service requests through your machine's own connection. Works with no other proxy option. Check it first with `unshackle tunnel-test`. See [Proxies & VPN](proxies-and-vpn.md#send-the-servers-requests-through-your-machine). |
+| `--local-proxy` | With `--remote`, send the server's service requests through your machine's own connection, or through a `--proxy` that your machine connects to. Check it first with `unshackle tunnel-test`. See [Proxies & VPN](proxies-and-vpn.md#send-the-servers-requests-through-your-machine). |
 | `--no-proxy` | Force-disable all proxy use. |
 | `--no-proxy-download` | Bypass the proxy for **all downloads** (manifest, licence, and auth stay proxied). |
 | `--proxy-download` | Use a different proxy for **all downloads**, in the same forms as `--proxy` (manifest, licence, and auth stay on `--proxy`). |
@@ -251,7 +254,7 @@ unshackle logs in to the service before the search. A service that declares a se
 |---|---|
 | `-p`, `--profile` | Profile for credentials and cookies. |
 | `--proxy` | Proxy URI, country or location code, or `provider:region` (e.g. `controld:ca`). |
-| `--local-proxy` | With `--remote`, send the server's search requests through your machine's own connection. Works with no other proxy option. |
+| `--local-proxy` | With `--remote`, send the server's search requests through your machine's own connection, or through a `--proxy` that your machine connects to. |
 | `--no-proxy` | Force-disable all proxy use. |
 | `--remote` | Search on a remote unshackle server. The server logs in to the service. unshackle sends it your credentials, cookies and cache for the profile, and saves the cache that the server sends back. A service that searches with no login gets none of them. |
 | `--local` | Search with the local service code, also when the config sets `remote: true` for the service. |
@@ -294,12 +297,13 @@ machine exits from, opens a tunnel to the server, and makes the server look up i
 through the tunnel. It stops at the first step that fails.
 
 ```
-unshackle tunnel-test [--server NAME]
+unshackle tunnel-test [--server NAME] [--proxy VALUE]
 ```
 
 | Flag | Description |
 |---|---|
 | `--server` | Name of the remote server from `remote_services` config, if you configure more than one. |
+| `--proxy` | Test the route through this proxy, as `--local-proxy --proxy` uses it. Takes any `--proxy` value. |
 
 See [Proxies & VPN](proxies-and-vpn.md#send-the-servers-requests-through-your-machine).
 
