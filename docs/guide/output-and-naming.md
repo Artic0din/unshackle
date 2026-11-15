@@ -15,7 +15,7 @@ When a download finishes, unshackle builds the final path from three pieces:
 - **Output directory**: `directories.downloads` from your config, or whatever you pass to `-o/--output` on the command line for a single run.
 - **Folder template**: an optional per-title subfolder. unshackle **always** puts TV episodes and songs in a folder. Movies only get one if you define a `movies` folder template, or a single-string `folder` template that applies to all title kinds (see [Folder templates](#folder-templates)).
 - **Filename template**: the `output_template` for the title kind (movie, series, or song).
-- **Extension**: chosen by the muxer for a movie or an episode: `.mkv` for video, `.mka` for audio-only, `.mks` for subtitle-only, `.mp4` for [DTS:X Profile 2 and MPEG-H audio](#dtsx-profile-2-and-mpeg-h-output). unshackle does not mux a song. It remuxes a song into the container of its codec, such as `.flac`, `.opus`, or `.m4a`. Read [Music output files](#music-output-files).
+- **Extension**: chosen by the muxer for a movie or an episode: `.mkv` for video, `.mka` for audio-only, `.mks` for subtitle-only, `.mp4` for [DTS:X Profile 2 and MPEG-H audio](#dtsx-profile-2-and-mpeg-h-output) and [3D video](#3d-output). unshackle does not mux a song. It remuxes a song into the container of its codec, such as `.flac`, `.opus`, or `.m4a`. Read [Music output files](#music-output-files).
 
 !!! example "A typical episode path"
     ```text
@@ -108,8 +108,9 @@ Every variable below is valid in both output and folder templates. unshackle tak
 | `quality` | Standard resolution with scan suffix | `1080p`, `2160p`, `576i` |
 | `resolution` | Standard resolution number only | `1080` |
 | `video` | Video codec | `H.264`, `H.265` |
-| `hdr` | Dynamic-range label | `HDR`, `HDR10P`, `DV`, `DV.HDR`, `DV.HDR10P`, `HLG` |
+| `hdr` | Dynamic-range label | `HDR`, `HDR10P`, `DV`, `DV.HDR`, `DV.HDR10P`, `HDRVivid`, `HLG` |
 | `hfr` | High frame rate marker (frame rate > 30) | `HFR` |
+| `3d` | Stereoscopic 3D marker (MV-HEVC video) | `3D` |
 | `edition` | Edition label from the track, if any | `Directors Cut` |
 | `tag` | Release-group tag (from `config.tag` or `--tag`) | `TAG` |
 | `repack` | `REPACK` when the `--repack` flag is used | `REPACK` |
@@ -261,22 +262,37 @@ The per-kind folder config keys are `movies`, `series`, `sports`, `songs`, and `
 
 ## Music output files
 
-A song does not go through the muxer. Music services deliver audio in a fragmented MP4, which is
-not a music file. Its header states a length of zero, so a player stops after the first fragment.
-FLAC inside an MP4 is also not a FLAC stream. A rename cannot correct either fault, so unshackle
-remuxes each downloaded audio track into the container of its codec, then moves the file to its
-final path.
+A song does not go through the muxer. Music services deliver audio as a fragmented MP4, a WebM
+file or a plain audio file, and every download has a `.mp4` name. A fragmented MP4 header states a
+length of zero, so a player stops after the first fragment. A rename cannot correct this, so
+unshackle remuxes each downloaded audio track into the container of its codec, then moves the file
+to its final path.
+
+FFprobe reads the codec from the downloaded file. The codec that the service declares is used only
+when FFprobe cannot read the file.
 
 | Codec | Extension |
 |---|---|
 | FLAC | `.flac` |
+| PCM, integer, 24-bit or less | `.flac` |
+| PCM, more than 24-bit or floating point | `.wav` |
 | Opus | `.opus` |
 | Vorbis | `.ogg` |
 | MP3 | `.mp3` |
-| AAC, ALAC, and all other codecs | `.m4a` |
+| DTS, DTS-HD | `.mka` |
+| AAC, ALAC, Dolby Digital, Dolby Digital Plus, and all other codecs | `.m4a` |
 
-unshackle re-encodes FLAC in this step. The audio does not change, but the new file states its
-true length. A plain copy cannot, because it keeps the source header and the zero in it.
+unshackle encodes FLAC and PCM to FLAC in this step. The audio does not change, but the new file
+states its true length. A plain copy cannot, because it keeps the source header and the zero in it.
+FLAC cannot hold floating-point PCM, and FFmpeg writes 32-bit FLAC only as an experimental feature,
+so that audio goes to `.wav`.
+
+FFmpeg writes DTS into MP4 with the wrong codec entry, so DTS goes to Matroska. AC-4, MPEG-H and
+DTS:X Profile 2 (DTS-UHD) go through MP4Box, because FFmpeg cannot write them into MP4. MP4Box
+needs [GPAC](../getting-started/installation.md#recommended-and-optional-tools).
+
+With `--sample`, the same step cuts the song to the sample window. If the window starts after the
+end of the song, unshackle shows a warning and keeps the full download.
 
 unshackle writes no `.mkv` file for music, and the [muxing options](#muxing-options) below do not
 apply.
@@ -294,13 +310,18 @@ around it.
 ### Music metadata
 
 After the file moves, unshackle writes the metadata into the audio file. It uses Vorbis
-comments for FLAC and Ogg, ID3 frames for MP3, and MP4 atoms for M4A. The tags hold the
-track title, artist, album artist, track and disc numbers, date, genre, ISRC, UPC,
-copyright, and record label. When `tag` and `tag_group_name` are set, unshackle also writes the group
-name into a `GROUP` tag.
+comments for FLAC and Ogg, ID3 frames for MP3 and WAV, MP4 atoms for M4A, and Matroska tags for
+MKA. The tags hold the track title, artist, album artist, track and disc numbers, date, genre,
+ISRC, UPC, copyright, and record label. When the service gives them, unshackle also writes each
+artist of a song with several artists into `ARTISTS`, and the ReplayGain values into
+`REPLAYGAIN_*` tags. An Opus file gets no `REPLAYGAIN_*` tags, because RFC 7845 advises against
+them in Opus files. When `tag` and `tag_group_name` are set, unshackle also writes the group name
+into a `GROUP` tag.
 
 unshackle embeds cover art when the service gives an artwork URL. It downloads the image
-and puts it in the file.
+and puts it in the file. With no artwork URL, it uses the first image attachment of the song. It
+converts a WebP image to JPEG. It skips an image larger than 16 MiB, the FLAC limit, with a
+warning. An MKA file gets no cover art.
 
 unshackle writes lyrics when the service supplies them: a `LYRICS` Vorbis comment for FLAC, a
 `USLT` frame for MP3, and a `©lyr` atom for M4A. Ogg uses the same `LYRICS` field as
@@ -313,8 +334,8 @@ the timed lines from that file. The file also comes back to the client from a re
 A metadata fault does not stop the run. The file is already in place, so unshackle writes a
 warning and continues.
 
-!!! warning "`--no-mux` leaves music files untagged"
-    [`--no-mux`](cli-reference.md#output-muxing-files) moves each downloaded track file to the output path without the tagging step. A music file from such a run holds only the metadata that the service put in it.
+!!! note "`--no-mux` does not change music output"
+    A song has no mux step, so [`--no-mux`](cli-reference.md#output-muxing-files) does not apply to it. The song gets the same file name, metadata, cover art and lyrics file as in a run without the flag.
 
 ## Muxing options
 
@@ -424,10 +445,40 @@ DTS:X Profile 1 is DTS-HD Master Audio and muxes to MKV as usual.
 
 An MP4 title loses:
 
-- the forced, hearing-impaired and original track flags
+- the default, forced, hearing-impaired and original track flags
 - attachments, such as subtitle fonts
 - SubStation Alpha (`.ass`) subtitles
 - container tags (`mkvpropedit`)
+
+### Audio Vivid output
+
+No muxer carries Audio Vivid (AVS3-P3): Matroska has no CodecID for it, and FFmpeg and MP4Box cannot
+write it to MP4. unshackle leaves an Audio Vivid track out of the mux and saves its original MPEG-TS file
+beside the output, named like a `--no-mux` audio file (`<name>.<language>.AV3A.ts`).
+
+With an Audio Vivid decoder named `avs3Decoder` in a `binaries` folder or on `PATH`, unshackle also
+decodes the track to PCM and muxes that into the output. unshackle does not ship the decoder: the UWA
+reference decoder's licence limits its use. A service that delivers Audio Vivid can declare the decoder so
+that `unshackle env check` lists it.
+
+Without the decoder, a title whose only tracks are Audio Vivid is not muxed.
+
+### 3D output
+
+A stereoscopic 3D (MV-HEVC) video track also muxes to MP4 with MP4Box, because Matroska has no
+mapping for its second view and `mkvmerge` drops it. There is no 3D Matroska output. unshackle
+finds a 3D track from the manifest, or from a second video layer in the downloaded file. The MP4
+title loses the same items as above. For a 3D title, unshackle also:
+
+- decrypts the track with mp4decrypt, whatever [`decryption`](../reference/configuration/drm.md#decryption) selects
+- writes QuickTime chapters
+- keeps the whole downloaded segments of a `--sample` run, because the MP4Box cut removes the 3D signalling
+- does not repack the track or rewrite its colour metadata with FFmpeg
+- writes no `--include-sample` sample, because `mkvmerge` cuts only Matroska files
+- never uses the track in a `HYBRID` merge
+
+A Dolby Vision profile 20 track has no HDR10 base layer, so a player without Dolby Vision shows
+wrong colours.
 
 You configure muxing (the combination of video, audio, subtitle, chapter and attachment tracks into a single Matroska file with `mkvmerge`) under the `muxing` config key. unshackle muxes only movies and episodes. Read [Music output files](#music-output-files) for what a music download does instead.
 
@@ -447,8 +498,14 @@ muxing:
 | `merge_video` | bool | `false` | Group video tracks that share the same resolution, range, and codec into one file so only language varies inside it. |
 | `merge_audio` | bool | `true` | Merge audio tracks of the same kind so multiple languages sit in one file. |
 | `default_language` | map | *(unset)* | Preferred language per track type (`video` / `audio` / `subtitle`). A track in the preferred language is flagged as the default track. |
+| `default_subtitle_type` | str or list | *(unset)* | The subtitle types that can take the default flag, in order: `forced`, `normal`, `sdh` (CC counts as SDH). The first subtitle track of the first type that the title has gets the flag. |
 
-When no track has the preferred language, unshackle applies sensible defaults. The video default falls back to the title language, then the original-language track, then the first track. The audio default is the original-language track. The subtitle default is a forced track in the first audio's language.
+When no track has the preferred language, unshackle applies sensible defaults. The video default falls back to the title language, then the original-language track, then the first track. The audio default is the original-language track. The subtitle default is a forced track in the language of the default audio track.
+
+Set `default_subtitle_type` to give the subtitle default to a different type. `default_subtitle_type: normal` with `default_language.subtitle: pl` puts the flag on the full Polish track when the title also has a forced Polish track. Without `default_language.subtitle`, the first track of the type in file order gets the flag, and a forced track counts only in the language of the default audio track. When the title has no track of a listed type, the rules above apply.
+
+!!! tip "Use `normal` for players that read the forced flag"
+    A forced track always carries the Matroska forced flag. A player that reads it, such as mpv or Jellyfin in its Smart mode, shows the forced track when the audio is in your subtitle language and the default track when it is not. `default_subtitle_type: forced` puts the default flag on the forced track, and such a player then shows it in place of the full track.
 
 !!! note "`default_language` only sets the default-track flag"
     `default_language` controls **which track carries the MKV `--default-track` flag**. Nothing else. It does not change track *selection* (that stays with `-l`/`--a-lang` and friends). It also does not touch which track carries the original flag: `--original-flag` still tags the *true* original-audio track. That is the point: you can make your player default to, say, Polish audio on an English-original title without altering the original marker. When the configured language is not present in the manifest, each track type falls back to its normal default rule described above.
@@ -458,17 +515,18 @@ When no track has the preferred language, unshackle applies sensible defaults. T
 
 A few muxing behaviors are automatic and not configurable:
 
-- `--no-date` is always passed for privacy (no timestamps embedded).
+- The output has no encoding date: mkvmerge gets `--no-date` and MP4Box gets `-for-test`.
 - Descriptive audio gets the visually-impaired flag. SDH subtitles get the hearing-impaired flag. Forced subtitles get the forced flag.
 - unshackle writes the chapters from the title's chapter list (see [Chapters](#chapters-naming) below).
 
-The `--no-mux` flag skips muxing entirely and writes the individual track files, each with a track-type suffix, into the same output/folder structure.
+The `--no-mux` flag skips muxing entirely and writes the individual track files, each with a track-type suffix, into the same output/folder structure. An audio track in an MP4 container gets the `.m4a` extension. A track that shaka-packager decrypts has its date set to 1970-01-01; other tracks keep the date of the source file.
 
 ## Sample files
 
 [`--sample`](cli-reference.md#output-muxing-files) and `--include-sample` write a sample into a
 `Sample` folder inside the output folder of the title. The sample keeps the filename of the
 title, with a `SAMPLE` tag at the end. The tag uses the separator of the output template.
+`--include-sample` cuts the sample with `mkvmerge`, so a title that muxes to MP4 gets no sample.
 
 ```text title="A movie with --include-sample"
 Some.Movie.2026.1080p.EXAMPLE.WEB-DL.H.264-TAG/

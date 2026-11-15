@@ -210,6 +210,8 @@ class DownloadJob:
     # Subtitles skipped under skip_subtitle_errors (non-fatal). Each entry is a dl.SkippedSubtitle
     # dict (id / language / title) so a client can report which weren't available.
     skipped_subtitles: List[Dict[str, Any]] = field(default_factory=list)
+    # Titles skipped because a requested track or language is missing; each a dl.SkippedTitle (title / reason).
+    skipped_titles: List[Dict[str, Any]] = field(default_factory=list)
 
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
@@ -241,6 +243,7 @@ class DownloadJob:
             "segments_total": self.segments_total,
             "speed": self.speed,
             "skipped_subtitles": self.skipped_subtitles,
+            "skipped_titles": self.skipped_titles,
             "input_prompt": self.input_prompt,
             "notice": self.notice,
             "approval": self.approval.to_dict() if self.approval is not None else None,
@@ -312,6 +315,7 @@ def record_job_history(job: DownloadJob) -> None:
         "created_time": job.created_time.isoformat(),
         "completed_time": job.completed_time.isoformat() if job.completed_time else None,
         "output_files": job.output_files,
+        "skipped_titles": job.skipped_titles,
         "parameters": redact_parameters(job.parameters),
         "error_message": _redact_text(job.error_message, job.parameters),
     }
@@ -628,6 +632,8 @@ def perform_download(
             log.error(f"Download exited with code {exc.code}")
             log.debug("Stdout: %s", stdout_capture.getvalue())
             log.debug("Stderr: %s", stderr_capture.getvalue())
+            if reason := getattr(dl_instance, "stop_reason", None):
+                raise APIError(APIErrorCode.DOWNLOAD_ERROR, f"Download failed: {reason}")
             captured = stderr_capture.getvalue().strip() or stdout_capture.getvalue().strip()
             lines = [line.strip() for line in click.unstyle(captured).splitlines() if line.strip()]
             detail = redact_all(lines[-1]) if lines else None
@@ -1077,7 +1083,8 @@ class DownloadQueueManager:
         try:
             while True:
                 done, _ = await asyncio.wait({communicate_task}, timeout=0.5)
-                # Check for progress updates (skip re-parse when the file hasn't changed since last tick)
+
+                # Read progress before the exit check so the worker's last write lands (skip an unchanged file)
                 try:
                     stat = os.stat(progress_path)
                     stat_key = (stat.st_mtime_ns, stat.st_size)
@@ -1125,6 +1132,8 @@ class DownloadQueueManager:
                                 )
                             if progress_data.get("skipped_subtitles"):
                                 job.skipped_subtitles = progress_data["skipped_subtitles"]
+                            if progress_data.get("skipped_titles"):
+                                job.skipped_titles = progress_data["skipped_titles"]
                             if "progress" in progress_data:
                                 new_progress = float(progress_data["progress"])
                                 if new_progress != job.progress:

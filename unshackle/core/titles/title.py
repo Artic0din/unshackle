@@ -106,6 +106,7 @@ class Title:
             "video": "",
             "hdr": "",
             "hfr": "",
+            "3d": "",
             "edition": "",
             "lang_tag": "",
             "title_type": {"Movie": "movie", "Episode": "series", "Song": "music"}.get(
@@ -148,7 +149,7 @@ class Title:
                     if base_layer and base_layer != "DV":
                         context["hdr"] += f".{base_layer}"
                 elif (primary_video_track.hdr_format or "").startswith("HDR Vivid"):
-                    context["hdr"] = "HDR"
+                    context["hdr"] = DYNAMIC_RANGE_MAP["HDR Vivid"]
                 else:
                     context["hdr"] = DYNAMIC_RANGE_MAP.get(hdr_format, "")
                     if context["hdr"] == "HDR" and any(v.range == Video.Range.HDR10P for v in self.tracks.videos[:1]):
@@ -163,6 +164,7 @@ class Title:
 
             frame_rate = float(primary_video_track.frame_rate) if primary_video_track.frame_rate else 0.0
             context["hfr"] = "HFR" if frame_rate > 30 else ""
+            context["3d"] = "3D" if any(v.stereo for v in self.tracks.videos[:1]) else ""
 
         if primary_audio_track:
             codec = primary_audio_track.format
@@ -184,7 +186,8 @@ class Title:
                 channels_str = f"{len(positions) - heights - lfe}.{lfe}.{heights}"
             else:
                 channels_str = f"{channels:.1f}"
-            builtin = AUDIO_CODEC_MAP.get(codec, codec)
+            profile = getattr(primary_audio_track, "format_profile", None)
+            builtin = AUDIO_CODEC_MAP.get(f"{codec} {profile}") or AUDIO_CODEC_MAP.get(codec, codec)
             audio = rename(builtin)
             spacer = " " if builtin in SPACED_AUDIO_CODECS or audio[-1:].isdigit() else ""
 

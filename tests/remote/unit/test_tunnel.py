@@ -16,16 +16,19 @@ import pytest
 import requests
 import responses
 from aiohttp import web
+from multidict import CIMultiDict
 
 from unshackle.core import tunnel
 from unshackle.core.api.routes import tunnel as tunnel_route
 from unshackle.core.api.routes import tunnel_check
+from unshackle.core.proxies.controld import relay
 from unshackle.core.tunnel import (
     CHECK_ROUTE,
     OPEN,
     ROUTE,
     TUNNELS,
     TunnelClient,
+    connect_proxied,
     connect_public,
     frame,
     is_ip_literal,
@@ -257,13 +260,16 @@ def local_proxy_ctx(params: dict, typed: set) -> click.Context:
     return ctx
 
 
-def test_local_proxy_works_with_no_other_proxy_option() -> None:
+def test_local_proxy_works_with_a_typed_proxy_and_no_other_proxy_option() -> None:
     from unshackle.core.proxies.resolve import require_alone_local_proxy
 
-    with pytest.raises(click.UsageError, match="--proxy, --proxy-download"):
+    with pytest.raises(click.UsageError, match="with --proxy-download\\.$"):
         require_alone_local_proxy(
             local_proxy_ctx({"remote": True, "proxy": "us", "proxy_download": "us"}, {"proxy", "proxy_download"})
         )
+    ctx = local_proxy_ctx({"remote": True, "proxy": "http://127.0.0.1:8080"}, {"proxy"})
+    require_alone_local_proxy(ctx)
+    assert ctx.params["proxy"] == "http://127.0.0.1:8080"
     with pytest.raises(click.UsageError, match="needs --remote"):
         require_alone_local_proxy(local_proxy_ctx({"remote": False}, set()))
 
@@ -356,6 +362,7 @@ def test_a_malformed_frame_still_leaves_the_tunnel_to_expire(server: str) -> Non
             async with http.ws_connect(server + ROUTE) as ws:
                 tunnel_id = (await ws.receive_json())["id"]
                 await ws.send_bytes(b"\x01")
+                await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY)
         return str(tunnel_id)
 
     tunnel_id = asyncio.run(send_short_frame())
@@ -369,10 +376,110 @@ def test_an_api_key_has_a_tunnel_limit(server: str) -> None:
     clients = [TunnelClient(server, {"X-Secret-Key": "bob"}) for _ in range(tunnel.MAX_TUNNELS)]
     for client in clients:
         client.start()
-    with pytest.raises(ConnectionError, match="429"):
+    with pytest.raises(ConnectionError, match="429, the API key already has the maximum number of tunnels open"):
         TunnelClient(server, {"X-Secret-Key": "bob"}).start()
     for client in clients:
         client.stop()
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_a_shared_api_key_counts_tunnels_for_each_client(
+    server: str, monkeypatch: pytest.MonkeyPatch, shared: bool
+) -> None:
+    from unshackle.core.config import config
+
+    monkeypatch.setitem(config.serve, "users", {"tier": {"shared": True} if shared else {}})
+    first = [TunnelClient(server, {"X-Secret-Key": "tier", "X-Client-Id": "u1"}) for _ in range(tunnel.MAX_TUNNELS)]
+    second = TunnelClient(server, {"X-Secret-Key": "tier", "X-Client-Id": "u2"})
+    try:
+        for client in first:
+            client.start()
+        if shared:
+            second.start()
+        else:
+            with pytest.raises(ConnectionError, match="maximum number of tunnels"):
+                second.start()
+        with pytest.raises(ConnectionError, match="maximum number of tunnels"):
+            TunnelClient(server, {"X-Secret-Key": "tier", "X-Client-Id": "u1"}).start()
+    finally:
+        for client in [*first, second]:
+            client.stop()
+
+
+def test_another_client_of_a_shared_api_key_cannot_reattach(server: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unshackle.core.config import config
+
+    monkeypatch.setitem(config.serve, "users", {"tier": {"shared": True}})
+    owner = TunnelClient(server, {"X-Secret-Key": "tier", "X-Client-Id": "u1"})
+    tunnel_id = owner.start()
+    try:
+        resp = requests.get(
+            f"{server}{ROUTE}?id={tunnel_id}", headers={"X-Secret-Key": "tier", "X-Client-Id": "u2"}, timeout=10
+        )
+        assert resp.status_code == 404
+    finally:
+        owner.stop()
+
+
+def test_stopping_one_client_leaves_the_other_tunnels_of_its_api_key_open(
+    server: str, target: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tunnel, "is_public_ip", lambda address: True)
+    monkeypatch.setattr(tunnel, "dialled_itself", lambda writer: False)
+    clients = [TunnelClient(server, {"X-Secret-Key": "erin"}) for _ in range(3)]
+    stopped, *running = [client.start() for client in clients]
+    try:
+        clients[0].stop()
+        assert wait_until(lambda: stopped not in TUNNELS, 5)
+        for tunnel_id in running:
+            proxy = tunnel_proxy(tunnel_id, "erin")
+            assert proxy
+            resp = requests.get(f"http://127.0.0.1:{target}/", proxies={"all": proxy}, timeout=10)
+            assert resp.text == "hello through the tunnel"
+    finally:
+        for client in clients[1:]:
+            client.stop()
+
+
+@pytest.mark.parametrize(
+    ("value", "seconds"),
+    [
+        ("5", 5),
+        ("0", 1),
+        (None, None),
+        ("", None),
+        ("\u00b2", None),
+        ("9" * 5000, None),
+        ("Wed, 21 Oct 2026 07:28:00 GMT", None),
+    ],
+    ids=["seconds", "zero", "absent", "empty", "superscript", "huge", "http-date"],
+)
+def test_parse_retry_after(value: str | None, seconds: int | None) -> None:
+    assert tunnel.parse_retry_after(value) == seconds
+
+
+def test_a_client_that_exits_frees_its_tunnel_at_once(server: str) -> None:
+    async def open_then_leave() -> str:
+        async with aiohttp.ClientSession(headers={"X-Secret-Key": "dave"}) as http:
+            async with http.ws_connect(server + ROUTE) as ws:
+                return str((await ws.receive_json())["id"])
+
+    tunnel_id = asyncio.run(open_then_leave())
+    assert wait_until(lambda: tunnel_id not in TUNNELS, 5)
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "reason"),
+    [
+        (429, {"Retry-After": "120"}, "HTTP 429, the API key is over its hourly request limit, retry in 120s"),
+        (429, {"retry-after": "120"}, "HTTP 429, the API key is over its hourly request limit, retry in 120s"),
+        (429, {}, "HTTP 429, the API key already has the maximum number of tunnels open"),
+        (404, None, "HTTP 404"),
+    ],
+)
+def test_a_refused_tunnel_names_the_reason(status: int, headers: dict[str, str] | None, reason: str) -> None:
+    error = aiohttp.WSServerHandshakeError(None, (), status=status, headers=CIMultiDict(headers or {}))  # type: ignore[arg-type]
+    assert tunnel.refusal(error) == reason
 
 
 def test_a_connection_that_stops_reading_is_dropped() -> None:
@@ -510,3 +617,120 @@ def test_a_failed_start_leaves_no_thread_behind() -> None:
         assert not client.thread.is_alive()
     finally:
         silent.close()
+
+
+class ExitProxy(socketserver.BaseRequestHandler):
+    """An exit proxy on this machine: takes one HTTP CONNECT or SOCKS5 CONNECT and pipes it to the test target."""
+
+    server: ExitServer
+
+    def handle(self) -> None:
+        sock, seen = self.request, self.server.seen
+        stream = sock.makefile("rb")
+        if stream.peek(1)[:1] == b"\x05":
+            stream.read(stream.read(2)[1])
+            sock.sendall(b"\x05\x02")
+            stream.read(1)
+            user = stream.read(stream.read(1)[0])
+            seen.append(user + b":" + stream.read(stream.read(1)[0]))
+            sock.sendall(b"\x01\x00")
+            address_type = stream.read(4)[3]
+            seen.append(stream.read(stream.read(1)[0] if address_type == 3 else 4 if address_type == 1 else 16))
+            stream.read(2)
+            sock.sendall(b"\x05\x00\x00\x01" + bytes(6))
+        else:
+            head = b""
+            while not head.endswith(b"\r\n\r\n"):
+                head += stream.readline()
+            seen.append(head)
+            sock.sendall(b"HTTP/1.1 " + self.server.status + b"\r\n\r\n")
+            if not self.server.status.startswith(b"200"):
+                return
+        upstream = socket.create_connection(("127.0.0.1", self.server.target))
+        threading.Thread(target=relay, args=(upstream, sock), daemon=True).start()
+        relay(sock, upstream)
+
+
+class ExitServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    seen: list[bytes]
+    status: bytes
+    target: int
+
+
+@pytest.fixture
+def exit_proxy(target: int) -> Iterator[ExitServer]:
+    proxy = ExitServer(("127.0.0.1", 0), ExitProxy)
+    proxy.seen, proxy.status, proxy.target = [], b"200 Connection established", target
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    yield proxy
+    proxy.shutdown()
+
+
+@pytest.mark.parametrize("scheme", ["http", "socks5h"])
+def test_the_tunnel_dials_through_an_exit_proxy_with_its_login(
+    server: str, exit_proxy: ExitServer, scheme: str
+) -> None:
+    port = exit_proxy.server_address[1]
+    client = TunnelClient(server, {"X-Secret-Key": "alice"}, f"{scheme}://us%40er:p%3Ass@127.0.0.1:{port}")
+    proxy = tunnel_proxy(client.start(), "alice")
+    resp = requests.get("http://hello.example/", proxies={"all": proxy}, timeout=10)
+    client.stop()
+
+    assert resp.text == "hello through the tunnel"
+    if scheme == "http":
+        assert exit_proxy.seen[0].startswith(b"CONNECT hello.example:80 HTTP/1.1\r\n")
+        assert b"Proxy-Authorization: Basic dXNAZXI6cDpzcw==\r\n" in exit_proxy.seen[0]
+    else:
+        assert exit_proxy.seen == [b"us@er:p:ss", b"hello.example"]
+
+
+@pytest.mark.parametrize(
+    ("host", "address"),
+    [
+        ("127.0.0.1", None),
+        ("::1", None),
+        ("10.1", None),
+        ("localhost", None),
+        ("printer.localhost.", None),
+        ("bad.example\r\nX-Injected: 1", None),
+        ("bad example", None),
+        ("rebind.example", "192.168.1.1"),
+        ("metadata.example", "169.254.169.254"),
+    ],
+)
+def test_the_exit_proxy_never_carries_a_local_or_malformed_target(
+    monkeypatch: pytest.MonkeyPatch, exit_proxy: ExitServer, host: str, address: str | None
+) -> None:
+    async def resolve(self: object, host: str, port: int, **_: object) -> list:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    if address:
+        monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", resolve)
+    with pytest.raises(PermissionError):
+        asyncio.run(connect_proxied(f"http://127.0.0.1:{exit_proxy.server_address[1]}", host, 80))
+    assert exit_proxy.seen == []
+
+
+def test_a_refused_connect_fails_and_never_dials_direct(
+    server: str, target: int, exit_proxy: ExitServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tunnel, "is_public_ip", lambda address: True)  # so a direct dial to the target would work
+    monkeypatch.setattr(tunnel, "dialled_itself", lambda writer: False)
+    exit_proxy.status = b"407 Proxy Authentication Required"
+    hits = Hello.hits
+    client = TunnelClient(server, {"X-Secret-Key": "alice"}, f"http://127.0.0.1:{exit_proxy.server_address[1]}")
+    proxy = tunnel_proxy(client.start(), "alice")
+    with pytest.raises(requests.exceptions.ConnectionError):
+        requests.get(f"http://127.0.0.1:{target}/", proxies={"all": proxy}, timeout=10)
+    client.stop()
+    assert len(exit_proxy.seen) == 1 and Hello.hits == hits
+    with pytest.raises(OSError, match="407"):
+        asyncio.run(connect_proxied(f"http://127.0.0.1:{exit_proxy.server_address[1]}", "hello.example", 80))
+
+
+def test_a_proxy_the_tunnel_cannot_dial_through_is_refused_at_start() -> None:
+    from unshackle.core.remote_service import start_tunnel
+
+    with pytest.raises(click.ClickException, match="cannot use a socks4 proxy"):
+        start_tunnel(None, "socks4://127.0.0.1:1080")  # type: ignore[arg-type]

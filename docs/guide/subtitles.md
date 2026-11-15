@@ -28,6 +28,7 @@ shown in track listings. The **Extension** column is the file extension used on 
 | `MicroDVD` | SUB | `sub` | MicroDVD |
 | `MPL2` | MPL2 | `mpl2` | MPL2 |
 | `TMP` | TMP | `tmp` | TMP |
+| `SCC` | SCC | `scc` | Scenarist Closed Captions (CEA-608), read only |
 | `fTTML` | STPP | `stpp` | MPEG-DASH box-encapsulated TTML (IMSC1) |
 | `fVTT` | WVTT | `wvtt` | MPEG-DASH box-encapsulated WebVTT |
 
@@ -65,6 +66,13 @@ format-appropriate clean-up to make a single, valid file:
   output format, unshackle automatically converts any plain TTML track to WebVTT before
   muxing (the closest lossless equivalent). Boxed `fTTML` is likewise unwrapped to TTML
   first.
+- **SCC for muxing**: Matroska cannot carry SCC, and no later step can read it. Before
+  muxing, unshackle converts an SCC track straight to the `--sub-format` you request
+  when that is SRT, WebVTT or TTML, and to SRT in all other cases (no `--sub-format`,
+  `original`, or another format, which unshackle then makes from the SRT). Choose
+  `--sub-format vtt` to keep the caption rows: WebVTT keeps a top-of-screen caption at
+  the top, SRT does not. unshackle reads only the CC1 channel. An SCC file with no CC1
+  captions gives an empty track and a warning.
 
 You normally do not need to think about any of this. It gives a clean file.
 
@@ -75,7 +83,7 @@ Subtitle selection happens through `dl` flags. The most important is language se
 | Flag | Purpose |
 | --- | --- |
 | `-sl`, `--s-lang` | Language(s) wanted for subtitles. Defaults to `all`. A `-` prefix excludes, e.g. `all,-es`. |
-| `--require-subs` | Require these languages to exist; if present, download **all** subtitles. Cannot be combined with `--s-lang`. |
+| `--require-subs` | Require these languages to exist. The title fails if one is missing. `--s-lang` still decides what to keep. |
 | `-fs`, `--forced-subs` | Include forced subtitle tracks (excluded by default). |
 | `-fso`, `--forced-subs-only` | Keep only forced subtitle tracks and drop the other subtitles; implies `-fs`. |
 | `-fsl`, `--forced-s-lang` | Language(s) wanted for forced subtitles; implies `-fs`. A `-` prefix excludes. |
@@ -83,6 +91,7 @@ Subtitle selection happens through `dl` flags. The most important is language se
 | `-S`, `--subs-only` | Download only subtitle tracks. |
 | `-ns`, `--no-subs` | Do not download subtitle tracks at all. |
 | `--sub-format` | Output subtitle format / conversion target (see [conversion](#converting-subtitle-formats)). |
+| `--sub-font` | Font for subtitles converted to ASS; implies `--sub-format ass` (see [custom font and style](#custom-font-and-style)). |
 | `--skip-subtitle-errors` | Skip a subtitle that fails to download instead of aborting the whole title. |
 
 ### Choosing languages
@@ -102,24 +111,20 @@ that variant:
 unshackle dl --s-lang es-419 EXAMPLE 'https://www.example.com/...'
 ```
 
-If a requested language is missing, unshackle stops with an error. With `--best-available`,
-it continues with the languages it found and tells you which ones it dropped. See
+If a requested language is missing, unshackle continues with the languages it found and
+tells you which ones it dropped. To stop the title instead, use `--require-subs`. See
 [exact vs fuzzy matching](downloading.md#exact-vs-fuzzy-matching) for the full rules.
 
 ### Requiring languages before downloading
 
-`--require-subs` is a gate rather than a filter. It downloads **all** available
-subtitles, but only if every language you name is present. If any is missing, the title
-errors out. This is useful for batch jobs where you want a title without your must-have
-language to fail loudly, and not to silently give a partial result.
+`--require-subs` is a gate rather than a filter. If any language you name is missing, the
+title fails, even under `--best-available`. It does not select tracks: `--s-lang` still
+decides what to keep. This is useful for batch jobs where you want a title without your
+must-have language to fail loudly, and not to silently give a partial result.
 
 ```shell title="Fail unless both English and French subs exist, then grab everything"
 unshackle dl --require-subs en,fr EXAMPLE B0ABCDEFGH
 ```
-
-!!! warning "`--require-subs` and `--s-lang` are mutually exclusive"
-    Because `--require-subs` forces downloading of all subtitle languages, it cannot be
-    combined with `--s-lang`. Choose one or the other.
 
 ### Forced subtitles
 
@@ -152,7 +157,7 @@ unshackle dl --s-lang en --forced-subs-only EXAMPLE 81234567
 
 `-fso` does not drop video or audio. Add `-S` for a subtitle-only download. A title with
 no forced track stops a run of one title. A run of more than one title skips that title
-with a warning.
+with a warning, and fails when it skips every title.
 
 ## Track types: forced, SDH, and CC
 
@@ -160,7 +165,9 @@ Every subtitle track carries flags describing what kind of captions it holds. Th
 flags drive selection, sort order, output filenames, and the Matroska track flags.
 
 - **Forced**: only signs and foreign dialogue, meant to play when the audio language
-  matches. Off by default. Enable it with `--forced-subs`.
+  matches. Off by default. Enable it with `--forced-subs`. To choose which type gets the
+  default flag in the file, set
+  [`muxing.default_subtitle_type`](../reference/configuration/download.md#muxing).
 - **SDH** (Subtitles for the Deaf and Hard-of-Hearing, also called HOH): a full
   transcript that includes both dialogue and non-speech sound cues.
 - **CC** (Closed Captions): captions originating from an EIA-608/708 broadcast stream,
@@ -303,8 +310,9 @@ styling that survives. `—` means that the backend cannot convert that pair.
 
 Reading the table:
 
-- **Keep the original**: leaving `--sub-format` unset (or set to `original`) never
-  round-trips the file, so every style survives. Only convert when your player cannot
+- **Keep the original**: leaving `--sub-format` unset (or set to `original`) does not
+  round-trip the file, so every style survives. TTML and SCC are the exceptions, as noted
+  above. Only convert when your player cannot
   read the source format.
 - **`subtitleedit`** (SubtitleEdit / `seconv`): the best choice for anything → SRT. It
   is the only backend that carries colour, and it embeds `{\an8}` tags to preserve
@@ -406,6 +414,60 @@ The pattern is `{base}.{language}[.forced][.sdh].{extension}`. The
 a format name like `srt` or `vtt`, or `original` to keep each subtitle in its downloaded
 format.
 
+## Custom font and style
+
+Services mostly deliver WebVTT, which players draw in their own plain font. To use a font
+of your choice, unshackle converts the subtitles to ASS and gives them one style:
+
+```shell title="Convert to ASS in a custom font"
+unshackle dl --sub-font "Noto Sans" EXAMPLE 81234567
+```
+
+`--sub-font` sets only the font name. The rest of the look comes from
+[`subtitle.ass_style`](#subtitle-configuration), a mapping of style fields. A field takes its
+[pysubs2 name](https://pysubs2.readthedocs.io/en/latest/api-reference.html#ssastyle-style-of-subtitles)
+(`primarycolor`) or its ASS name (`PrimaryColour`). Give sizes and margins for a 1080-line
+picture. unshackle writes a 1080-line canvas in the shape of the video, and the player scales
+it to the screen, so the text has the same size on a 720p, 1080p or 2160p video.
+
+```yaml title="unshackle.yaml"
+subtitle:
+  ass_style:
+    fontname: Noto Sans
+    fontsize: 72
+    primarycolor: "&H00FFFFFF"
+    marginv: 60
+```
+
+The fields you leave out keep these defaults: `fontname: Arial`, `fontsize: 72`, `bold: true`,
+`outline: 3.6`, `shadow: 1.5`, `backcolor: "&HA0000000"`, `marginl: 100`, `marginr: 100` and
+`marginv: 60`. Write colours as `&HAABBGGRR` strings in quotes: in YAML, an unquoted `&` starts
+an anchor, and an unquoted number is not read as a colour.
+
+- A style makes ASS the output format when you set no `--sub-format`. With `--sub-format ass`
+  or `ssa` the style applies too. With another format, unshackle does not use the style.
+  A `--sub-font` that you type overrides a `sub_format` from the configuration file, and stops
+  the download with an error when you also type another `--sub-format`. A `sub_font` from the
+  configuration file is ignored when the format is not ASS.
+- The style applies only to subtitles that unshackle converts into ASS. A subtitle that is
+  already SSA/ASS keeps its own styles, positions and canvas, and so does its SDH-stripped copy.
+- The SDH-stripped copy of a converted track keeps the style.
+- unshackle checks the style before it downloads. An unknown field or a value that does not
+  fit its field stops the download with an error.
+- With `output_mode: sidecar` and a `sidecar_format` other than `ass`, the sidecar files do
+  not use the style.
+- Closed captions that unshackle extracts from the video stay SRT.
+
+!!! note "Player settings"
+    A player draws an ASS subtitle with its own style, so player options for text subtitles,
+    such as the mpv options `sub-font` and `sub-font-size`, no longer apply. The text size
+    follows the height of the video, so on a wide video such as 1920x800 the text is smaller
+    than on a 1920x1080 video.
+
+The font must be on your system or in [`directories.fonts`](../reference/configuration/directories.md),
+in a folder with the family name, for example `fonts/Noto Sans/NotoSans-Regular.ttf`. unshackle
+attaches it to the MKV, as described below.
+
 ## Fonts for styled subtitles
 
 Styled SSA/ASS subtitles reference specific fonts by name. When unshackle muxes such a
@@ -442,6 +504,7 @@ subtitle:
 | `group_by` | `type` | `type`, `language` | Whether all tracks of one type stay together, or each language stays next to its own variants. |
 | `language_priority` | *(unset)* | a list of languages | Languages to sort to the top. The rest keep the default order. Nothing is removed. |
 | `dedupe_codecs` | *(unset)* | a list of codecs, e.g. `[VTT, STPP, WVTT]` | Keep one copy of a subtitle that the service sends in several codecs: the earliest listed codec wins. |
+| `ass_style` | *(unset)* | a mapping of pysubs2 style fields | The look of subtitles converted to ASS; makes ASS the default output format. See [custom font and style](#custom-font-and-style). |
 
 ### Which settings to change
 

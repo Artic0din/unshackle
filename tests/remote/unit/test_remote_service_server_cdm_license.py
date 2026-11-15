@@ -96,3 +96,48 @@ def test_proxy_mode_keeps_the_callers_type():
     assert licence == b"lic"
     assert svc.client.posts[0]["drm_type"] == "playready"
     assert svc.client.posts[0]["pssh"] == "PR"
+
+
+def test_a_refused_relayed_licence_raises_a_click_exception_with_the_server_message(caplog):
+    import click
+
+    from unshackle.core.remote_service import RemoteError
+
+    svc = _service("widevine", {})
+    svc._server_cdm = False
+    svc.drain_server_logs = lambda: None
+
+    def refuse(endpoint, payload, expect=()):
+        raise RemoteError("Licence request failed: refused", "SERVICE_ERROR")
+
+    svc.client.post = refuse
+    track = SimpleNamespace(id="vid", drm=[_PlayReady()])
+
+    with pytest.raises(click.ClickException, match="^Licence request failed: refused$"):
+        svc.proxy_license(b"chal", track, "playready")
+
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_a_refused_server_cdm_licence_logs_one_warning(caplog):
+    from unshackle.core.remote_service import RemoteError
+
+    svc = _service("widevine", {})
+
+    def refuse(endpoint, payload, expect=()):
+        raise RemoteError("Server error [SERVICE_ERROR]: refused", "SERVICE_ERROR")
+
+    svc.client.post = refuse
+    track = SimpleNamespace(id="vid", drm=[_Widevine()])
+
+    assert svc.proxy_license(b"chal", track, "widevine") == b"chal"
+    assert [r.levelname for r in caplog.records if r.levelname in ("WARNING", "ERROR")] == ["WARNING"]
+
+
+def test_the_kid_dl_needs_goes_to_the_server():
+    svc = _service("widevine", {"keys": {KID.hex: "k"}, "drm_type": "widevine"})
+    track = SimpleNamespace(id="vid", drm=[_Widevine()])
+
+    svc.get_widevine_license(challenge=b"", title=None, track=track, kid=KID)
+
+    assert svc.client.posts[0]["kid"] == KID.hex

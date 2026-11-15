@@ -16,6 +16,7 @@ import unicodedata
 import zlib
 from collections import defaultdict
 from datetime import datetime, timezone
+from fractions import Fraction
 from functools import cache
 from pathlib import Path
 from types import ModuleType
@@ -473,6 +474,16 @@ def original_tag(language: Union[str, Language], exact: bool = False) -> str:
     return str(language) if exact else ServiceTag(str(language))
 
 
+def orig_token(
+    requested: Sequence[str], language: Optional[Union[str, Language]], exact: bool = False
+) -> Optional[str]:
+    """The tag 'orig' resolved to, for as_requested. None when 'orig' did not resolve or the user also named that tag."""
+    if "orig" not in requested or not language:
+        return None
+    tag = original_tag(language, exact)
+    return None if tag in requested else tag
+
+
 def resolve_sort_langs(
     tokens: Sequence[str], original: Optional[Union[str, Language]] = None, *, exact: bool = False
 ) -> list[str]:
@@ -828,9 +839,16 @@ def extract_font_family(font_path: Path) -> Optional[str]:
     return None
 
 
+WINDOWS_FONTS_DIR = Path(r"C:\Windows\Fonts")
+
+
 def get_windows_fonts() -> dict[str, Path]:
     """
-    Get fonts from Windows registry.
+    Get the fonts installed for all users and for the current user from the Windows registry.
+
+    Only TrueType and OpenType files that exist are kept: a bitmap font cannot be attached, and a per-user entry
+    can outlive its file. Each font is also listed under the family name in its file, because a registry name
+    can differ from it (``GandhiSansPL-Bold`` for the family ``Gandhi Sans PL``).
 
     Returns:
         Dictionary mapping font family names to their file paths
@@ -839,14 +857,24 @@ def get_windows_fonts() -> dict[str, Path]:
         raise OSError("Windows font registry is only available on Windows")
     import winreg
 
-    with winreg.ConnectRegistry(None, winreg.HKEY_LOCAL_MACHINE) as reg:
-        key = winreg.OpenKey(reg, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts", 0, winreg.KEY_READ)
-        total_fonts = winreg.QueryInfoKey(key)[1]
-        return {
-            name.replace(" (TrueType)", ""): Path(r"C:\Windows\Fonts", filename)
-            for n in range(0, total_fonts)
-            for name, filename, _ in [winreg.EnumValue(key, n)]
-        }
+    fonts: dict[str, Path] = {}
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            key = winreg.OpenKey(hive, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts", 0, winreg.KEY_READ)
+        except OSError:
+            continue
+        with key:
+            for n in range(winreg.QueryInfoKey(key)[1]):
+                name, filename, _ = winreg.EnumValue(key, n)
+                if not isinstance(filename, str):
+                    continue
+                path = Path(WINDOWS_FONTS_DIR, filename)
+                if path.suffix.lower() in {".ttf", ".otf", ".ttc"} and path.is_file():
+                    fonts.setdefault(name.replace(" (TrueType)", ""), path)
+    for path in dict.fromkeys(fonts.values()):
+        if family := extract_font_family(path):
+            fonts.setdefault(family, path)
+    return fonts
 
 
 def scan_font_directory(font_dir: Path, fonts: dict[str, Path], log: logging.Logger) -> None:
@@ -1058,6 +1086,13 @@ class FPS(ast.NodeVisitor):
     @classmethod
     def parse(cls, expr: str) -> float:
         return cls().visit(ast.parse(expr).body[0])
+
+    @staticmethod
+    def exact(fps: float) -> Fraction:
+        """The frame rate as a fraction; a rate within 0.05% of an N*1000/1001 rate becomes that rate."""
+        rate = Fraction(fps)
+        ntsc = Fraction(round(rate * Fraction(1001, 1000)) * 1000, 1001)
+        return ntsc if abs(rate - ntsc) < rate / 2000 else rate.limit_denominator(1001)
 
 
 """

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import html
 import logging
 import math
@@ -20,7 +21,8 @@ from datetime import date, timedelta
 from functools import partial
 from http.cookiejar import CookieJar, MozillaCookieJar
 from io import StringIO
-from itertools import product
+from itertools import groupby, product
+from operator import attrgetter
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Callable, Collection, Optional, Sequence, TypedDict, Union, cast
@@ -44,7 +46,7 @@ from unshackle.core import __version__, binaries, providers
 from unshackle.core.cdm import DecryptLabsRemoteCDM
 from unshackle.core.cdm.detect import cdm_type_stub, is_playready_cdm, is_remote_cdm, is_widevine_cdm
 from unshackle.core.config import cdm_entry_names_device, config, load_yaml, resolve_cdm_name, resolve_decryption
-from unshackle.core.console import GradientPulseBarColumn, SyncLive, console, listing_panel
+from unshackle.core.console import GradientPulseBarColumn, SyncLive, console, listing_panel, print_listing
 from unshackle.core.constants import (
     DEFAULT_SAMPLE,
     DOWNLOAD_ALL_DRM,
@@ -102,7 +104,13 @@ from unshackle.core.tracks import Audio, Subtitle, Tracks, Video
 from unshackle.core.tracks.attachment import Attachment
 from unshackle.core.tracks.dv_fixup import apply_dv_fixup
 from unshackle.core.tracks.hybrid import Hybrid
-from unshackle.core.tracks.track import Track, assert_fragments_decrypted, has_encrypted_sample_entry
+from unshackle.core.tracks.subtitle_convert import PYCAPTION_WRITERS, SUBSTATION, build_ass_style
+from unshackle.core.tracks.track import (
+    Track,
+    assert_fragments_decrypted,
+    fix_data_reference_indexes,
+    has_encrypted_sample_entry,
+)
 from unshackle.core.tracks.tracks import at_resolution
 from unshackle.core.utilities import (
     apply_original_language,
@@ -119,7 +127,7 @@ from unshackle.core.utilities import (
     matched_language_tags,
     matching_languages,
     missing_required_langs,
-    original_tag,
+    orig_token,
     partition_exclusions,
     plain_subtitle_tags,
     resolve_sort_langs,
@@ -128,6 +136,7 @@ from unshackle.core.utilities import (
     time_elapsed_since,
 )
 from unshackle.core.utils import tags
+from unshackle.core.utils.audio_vivid import decode_audio_vivid
 from unshackle.core.utils.bitrate import apply_real_bitrates
 from unshackle.core.utils.click_types import (
     AUDIO_CODEC_LIST,
@@ -144,14 +153,23 @@ from unshackle.core.utils.click_types import (
 from unshackle.core.utils.collections import ci_get, merge_dict
 from unshackle.core.utils.hdr10plus import probed_tracks
 from unshackle.core.utils.post_scripts import NO_POST_SCRIPTS, build_context, dispatch, season_context
-from unshackle.core.utils.redact import mask_proxy
+from unshackle.core.utils.redact import mask_proxy, redact_secrets
 from unshackle.core.utils.selector import select_multiple
-from unshackle.core.utils.subprocess import ffmpeg_decodes, ffprobe, run_step
+from unshackle.core.utils.subprocess import ffmpeg_decodes, ffprobe
 from unshackle.core.vault import Vault
 from unshackle.core.vaults import Vaults
 
 if TYPE_CHECKING:
+    import pysubs2
+
     from unshackle.core.remote_service import ServerKeySource
+
+
+class SkippedTitle(TypedDict):
+    """A title skipped because a requested track or language is missing. Accumulated as ``dl.skipped_titles``."""
+
+    title: str
+    reason: str
 
 
 class SkippedSubtitle(TypedDict):
@@ -237,33 +255,101 @@ def group_videos_by_variant(videos: list[Video], *, merge: bool) -> list[list[Vi
     return list(groups.values())
 
 
+HYBRID_BASE_RANGES = (Video.Range.HDR10P, Video.Range.HDR10)
+
+
+def convert_scc(subtitle: Subtitle, sub_format: Optional[Union[Subtitle.Codec, str]]) -> Subtitle.Codec:
+    """
+    Convert an SCC subtitle to sub_format when pycaption can write it, else to SRT, and return the new codec.
+    Only pycaption reads SCC, and nothing later in the pipeline (styling, SDH strip, mux) can.
+    """
+    target = Subtitle.Codec.SubRip
+    if isinstance(sub_format, Subtitle.Codec) and sub_format in PYCAPTION_WRITERS:
+        target = sub_format
+    subtitle.convert(target)
+    if subtitle.path and not subtitle.path.read_text("utf8").strip():
+        logging.getLogger("Subtitle").warning(f"SCC subtitle {subtitle.language} has no CC1 captions")
+    return target
+
+
 def select_hybrid_bases(videos: Sequence[Video]) -> list[Video]:
     """The HDR10 or HDR10+ track that is the hybrid base for each height, tallest first.
 
-    Only HEVC tracks qualify, because dovi_tool injects the RPU into an HEVC stream.
+    Only HEVC tracks qualify, because dovi_tool injects the RPU into an HEVC stream. HDR10+ comes before
+    HDR10 at one height.
     """
     bases: dict[int, Video] = {}
     for video in sorted(
-        (
-            v
-            for v in videos
-            if v.range in (Video.Range.HDR10P, Video.Range.HDR10) and v.codec in (Video.Codec.HEVC, None)
-        ),
-        key=lambda v: v.height or 0,
+        (v for v in videos if v.range in HYBRID_BASE_RANGES and v.codec in (Video.Codec.HEVC, None)),
+        key=lambda v: (v.height or 0, v.range == Video.Range.HDR10P),
         reverse=True,
     ):
         bases.setdefault(video.height or 0, video)
     return list(bases.values())
 
 
+def generated_dv_ranges(
+    range_: Sequence[Video.Range], generate_dv: bool
+) -> tuple[list[Video.Range], list[Video.Range]]:
+    """Turn ``-r HDR10 --generate-dv`` (or HDR10P) into a HYBRID run on that base alone.
+
+    Returns the ranges to run with, and the base ranges the user named. The second list is empty when
+    the flag is off, HYBRID or DV is in the ranges, or no base range is. The service still gets the
+    ranges the user gave, so it fetches no DV track.
+    """
+    bases = [r for r in range_ if r in HYBRID_BASE_RANGES]
+    if not generate_dv or not bases or Video.Range.HYBRID in range_ or Video.Range.DV in range_:
+        return list(range_), []
+    return [Video.Range.HYBRID, *(r for r in range_ if r not in bases)], bases
+
+
+def keep_generated_dv_bases(videos: Sequence[Video], bases: Sequence[Video.Range]) -> list[Video]:
+    """The videos without the DV tracks and without a hybrid base range the user did not name."""
+    return [v for v in videos if v.range != Video.Range.DV and (v.range not in HYBRID_BASE_RANGES or v.range in bases)]
+
+
+def subtitle_look(
+    sub_format: Optional[Union[Subtitle.Codec, str]],
+    sub_font: Optional[str],
+    style_fields: Any,
+    *,
+    typed_font: bool = True,
+    typed_format: bool = True,
+) -> tuple[Optional[Union[Subtitle.Codec, str]], Optional[pysubs2.SSAStyle]]:
+    """The subtitle format and ASS style for --sub-font and the subtitle.ass_style config.
+
+    A style makes ASS the format when none is set. Another format leaves the style unused. A typed --sub-font
+    overrides a format from config, refuses a typed one, and a font from config is ignored like the config style.
+    """
+    if typed_font and sub_font and sub_format is not None and sub_format not in SUBSTATION:
+        if typed_format:
+            raise ValueError(f"--sub-font needs ASS subtitles, not {getattr(sub_format, 'name', sub_format)}")
+        sub_format = None
+    if not (style_fields or sub_font) or sub_format not in (None, *SUBSTATION):
+        return sub_format, None
+    if not isinstance(style_fields, (dict, type(None))):
+        raise ValueError("subtitle.ass_style must be a mapping of style fields")
+    style = build_ass_style({**(style_fields or {}), **({"fontname": sub_font} if sub_font else {})})
+    return sub_format or Subtitle.Codec.SubStationAlphav4, style
+
+
+def set_subtitle_look(
+    subtitles: Iterable[Subtitle], style: Optional[pysubs2.SSAStyle], videos: Iterable[Video]
+) -> None:
+    """Give each subtitle that is not already SSA/ASS the style, and every subtitle the size of the first video."""
+    size = next(((v.width, v.height) for v in videos if v.width and v.height), None)
+    for subtitle in subtitles:
+        subtitle.ass_style = None if subtitle.codec in SUBSTATION else style
+        subtitle.ass_video_size = size
+
+
 def hybrid_gate_failure(videos: Sequence[Video], generate_dv: bool) -> Optional[str]:
     """The message that stops HYBRID for these selected videos, or None when it can go on."""
     if any(v.native_hybrid for v in videos):
         return None
-    hdr_tracks = [v for v in videos if v.range in (Video.Range.HDR10, Video.Range.HDR10P)]
+    hdr_tracks = [v for v in videos if v.range in HYBRID_BASE_RANGES]
     base_tracks = [v for v in hdr_tracks if v.codec in (Video.Codec.HEVC, None)]
     dv_tracks = [v for v in videos if v.range == Video.Range.DV]
-    has_hdr10p = any(v.range == Video.Range.HDR10P for v in base_tracks)
     ranges = ", ".join(sorted(set(v.range.name for v in videos))) or "none"
     missing = f"HYBRID needs HDR10/HDR10+ and DV tracks, available ranges: {ranges}"
 
@@ -272,42 +358,40 @@ def hybrid_gate_failure(videos: Sequence[Video], generate_dv: bool) -> Optional[
     if not base_tracks:
         codecs = sorted(set(v.codec.name for v in hdr_tracks if v.codec))
         return f"HYBRID needs an HEVC HDR10/HDR10+ base, available codecs: {', '.join(codecs)}"
-    if not dv_tracks and not (generate_dv and has_hdr10p):
-        if generate_dv:
-            return f"{missing}; --generate-dv found no HEVC HDR10+ track"
-        if has_hdr10p:
-            return f"{missing}; add --generate-dv to make DV from HDR10+"
-        return missing
+    if not dv_tracks and not generate_dv:
+        return f"{missing}; add --generate-dv to make DV"
     return None
 
 
 def hybrid_plan(videos: Sequence[Video], generate_dv: bool) -> tuple[list[Video], Optional[Video]]:
-    """The hybrid bases and the DV track to pair with them.
+    """The hybrid bases and the 2D DV track to pair with them.
 
-    With no DV track, only HDR10+ bases qualify, and only with ``--generate-dv``. A resolution with a
+    With no DV track, a base qualifies only with ``--generate-dv``. A resolution with a
     finished hybrid (``native_hybrid``) gets no base: that track is its hybrid.
     """
-    dv_tracks = [v for v in videos if v.range == Video.Range.DV]
+    dv_tracks = [v for v in videos if v.range == Video.Range.DV and not v.stereo]
     native_heights = {v.height for v in videos if v.native_hybrid}
-    base_pool = [
-        v
-        for v in videos
-        if v.height not in native_heights and (dv_tracks or (generate_dv and v.range == Video.Range.HDR10P))
-    ]
+    base_pool = [v for v in videos if v.height not in native_heights and (dv_tracks or generate_dv)]
     matching_dv = min(dv_tracks, key=lambda v: v.height or 0) if dv_tracks else None
     return select_hybrid_bases(base_pool), matching_dv
+
+
+def pick_video(candidates: list[Video], worst: bool) -> Optional[Video]:
+    """The best candidate, or with ``worst`` the last one, preferring 2D: a 3D track sorts after 2D at one height."""
+    if worst:
+        pool = [v for v in candidates if not v.stereo] or candidates
+        return pool[-1] if pool else None
+    return next(iter(candidates), None)
 
 
 def hybrid_source_tracks(base: Video, dv: Optional[Video], base_container: Optional[Path] = None) -> list[Video]:
     """Copies of the base and DV tracks for the hybrid step, with the base on its container file.
 
     The hybrid step reads the duration and seeks, and the raw stream from the DV fixup
-    permits neither. With no DV track, the hybrid step makes Dolby Vision from the base's HDR10+.
+    permits neither. With no DV track, the hybrid step makes Dolby Vision for the base.
     """
     tracks = [deepcopy(track) for track in (base, dv) if track]
     tracks[0].path = base_container or base.path
-    for track in tracks:
-        track.needs_duration_fix = True
     return tracks
 
 
@@ -419,8 +503,8 @@ def post_script_group(candidate: Any) -> Any:
     return ("title", id(candidate))
 
 
-def remux_music_tracks(title: Any, log: logging.Logger) -> None:
-    """Remux each audio track of a Song into the container of its codec.
+def remux_music_tracks(title: Any, log: logging.Logger, sample: Optional[tuple[int, int]] = None) -> None:
+    """Remux each audio track of a Song into the container of its codec, cut to ``sample`` when given.
 
     A Song never reaches the muxer, so each downloaded audio track is itself a delivered
     file. A failure warns, keeps that downloaded track, and moves on to the next one: the
@@ -429,45 +513,51 @@ def remux_music_tracks(title: Any, log: logging.Logger) -> None:
     if not isinstance(title, Song):
         return
     for track in title.tracks.audio:
+        window = (max(sample[0] - track.sample_start, 0), sample[1] - sample[0]) if sample else (0.0, None)
         try:
-            track.to_music_container()
+            track.to_music_container(*window)
         except Exception as e:  # noqa: BLE001
             log.warning(f"Could not remux audio track {track.id} for music: {e}")
 
 
-def cut_music_sample(title: Any, window: tuple[int, int], log: logging.Logger) -> None:
-    """Cut each audio track of a Song to the sample window. A Song has no mux step that cuts it."""
-    if not isinstance(title, Song) or not binaries.FFMPEG:
-        return
-    for track in title.tracks.audio:
-        if not track.path or not track.path.exists():
-            continue
-        cut_path = track.path.with_stem(f"{track.path.stem}_cut")
-        try:
-            run_step(
-                [
-                    binaries.FFMPEG,
-                    "-v",
-                    "error",
-                    "-y",
-                    "-ss",
-                    f"{max(window[0] - track.sample_start, 0):.3f}",
-                    "-i",
-                    track.path,
-                    "-t",
-                    str(window[1] - window[0]),
-                    "-map",
-                    "0",
-                    "-c",
-                    "copy",
-                    cut_path,
-                ],
-                output=cut_path,
-                label="music sample cut",
-            )
-            os.replace(cut_path, track.path)
-        except RuntimeError as e:
-            log.warning(f"Could not cut audio track {track.id} to the sample window, so it holds whole segments: {e}")
+def mux_skipped(no_mux: bool, title: Any) -> bool:
+    """A Song has no mux step, so --no-mux never applies to it."""
+    return no_mux and not isinstance(title, Song)
+
+
+def take_unmuxable_audio(tracks: Tracks, log: logging.Logger) -> list[Audio]:
+    """Remove and return the Audio Vivid tracks, which no muxer carries, to be saved beside the output.
+
+    With the user's decoder, each one also goes back into the mux as a WAV copy.
+    """
+    kept = [a for a in tracks.audio if a.codec == Audio.Codec.AV3A]
+    tracks.audio = [a for a in tracks.audio if a.codec != Audio.Codec.AV3A]
+    for track in kept:
+        wav = decode_audio_vivid(track.path, log) if track.path else None
+        if wav:
+            decoded = copy.copy(track)
+            decoded.path = wav
+            decoded.codec = Audio.Codec.PCM
+            tracks.audio.append(decoded)
+    return kept
+
+
+def track_file_suffix(track: Any) -> str:
+    """The name part a track file saved on its own adds after the title: language and codec, or subtitle flags."""
+    if isinstance(track, Video):
+        return f".{track.codec.name if track.codec is not None else 'video'}"
+    lang_suffix = f".{track.language}" if track.language else ""
+    if isinstance(track, Audio):
+        return f"{lang_suffix}.{track.codec.name if track.codec is not None else 'audio'}"
+    if isinstance(track, Subtitle):
+        return f"{lang_suffix}{'.forced' if track.forced else ''}{'.sdh' if track.sdh else ''}"
+    return ""
+
+
+def no_mux_extension(track: Any, path: Path, media_info: MediaInfo) -> str:
+    """The extension of a --no-mux track file: an audio track in an MPEG-4 file is saved as .m4a."""
+    container = media_info.general_tracks[0].format if media_info.general_tracks else None
+    return ".m4a" if isinstance(track, Audio) and path.suffix == ".mp4" and container == "MPEG-4" else path.suffix
 
 
 def apply_service_dl_overrides(ctx: click.Context, service_dl_config: dict[str, Any], log: logging.Logger) -> None:
@@ -563,8 +653,10 @@ class dl:
             font_name: Font family name to find
 
         Returns:
-            Path to font file, or None if not found
+            Path to font file, or None if not found. A name that is a path, not one folder name, finds nothing.
         """
+        if Path(font_name).name != font_name or font_name in ("", ".."):
+            return None
         family_dir = Path(config.directories.fonts, font_name)
         if family_dir.exists():
             fonts = list(family_dir.glob("*.*tf"))
@@ -905,6 +997,12 @@ class dl:
         default=[],
         help="Subtitle languages that must exist. The title fails if one is missing. -sl still decides what to keep.",
     )
+    @click.option(
+        "--skip-missing",
+        is_flag=True,
+        default=False,
+        help="Skip a title that misses a required language or track and continue with the next title.",
+    )
     @click.option("-fs", "--forced-subs", is_flag=True, default=False, help="Include forced subtitle tracks.")
     @click.option(
         "-fso",
@@ -936,7 +1034,7 @@ class dl:
         "--local-proxy",
         is_flag=True,
         default=False,
-        help="With --remote, the server sends its service requests out through this machine's own connection (and any VPN on it). Works with no other proxy option.",
+        help="With --remote, the server sends its service requests out through this machine's own connection (and any VPN on it), or through a --proxy dialled from this machine.",
     )
     @click.option(
         "--tag",
@@ -985,6 +1083,13 @@ class dl:
         "a series' Streaming Order is 'alternate'. Defaults to the tvdb_order config option.",
     )
     @click.option(
+        "-ce",
+        "--continuous-episodes",
+        is_flag=True,
+        default=False,
+        help="Number each season on from the season before it, e.g. S02E05 after a four-episode season one.",
+    )
+    @click.option(
         "--anilist",
         "anilist_id",
         type=str,
@@ -1021,6 +1126,12 @@ class dl:
         type=SUBTITLE_CODEC,
         default=None,
         help="Set Output Subtitle Format, only converting if necessary. Use 'original' to keep source format.",
+    )
+    @click.option(
+        "--sub-font",
+        type=str,
+        default=None,
+        help="Font for subtitles converted to ASS, with the subtitle.ass_style look. Implies --sub-format ASS.",
     )
     @click.option("-V", "--video-only", is_flag=True, default=False, help="Only download video tracks.")
     @click.option("-A", "--audio-only", is_flag=True, default=False, help="Only download audio tracks.")
@@ -1225,13 +1336,14 @@ class dl:
         "best_available",
         is_flag=True,
         default=False,
-        help="Warn instead of failing when a requested resolution, range, or language is missing, and continue with what is available.",
+        help="Warn instead of failing when a requested resolution, range, video language, or audio language is missing.",
     )
     @click.option(
         "--generate-dv",
         is_flag=True,
         default=False,
-        help="With -r HYBRID, make Dolby Vision from the HDR10+ metadata when a title has no Dolby Vision track.",
+        help="Make Dolby Vision from HDR10+ or the decoded video: with -r HYBRID when a title has no DV track, "
+        "with -r HDR10 or HDR10P for that base alone.",
     )
     @click.option(
         "--remote/--local",
@@ -1259,6 +1371,7 @@ class dl:
     LICENSE_KEY_CACHE: dict[UUID, str] = {}
     ALL_DRM_LOCK = Lock()
     _remote_service: Optional["ServerKeySource"] = None
+    typed_params: frozenset[str] = frozenset()
 
     def __init__(
         self,
@@ -1272,6 +1385,7 @@ class dl:
         imdb_id: Optional[str] = None,
         tvdb_id: Optional[int] = None,
         tvdb_order: Optional[str] = None,
+        continuous_episodes: bool = False,
         anilist_id: Optional[Union[int, str]] = None,
         enrich: bool = False,
         daily: bool = False,
@@ -1284,10 +1398,18 @@ class dl:
             raise ValueError("A subcommand to invoke was not specified, the main code cannot continue.")
 
         self.log = logging.getLogger("download")
+        self.typed_params = frozenset(
+            name
+            for name in ("sub_font", "sub_format")
+            if ctx.get_parameter_source(name) not in (None, ParameterSource.DEFAULT, ParameterSource.DEFAULT_MAP)
+        )
         self.completed_files: list[Path] = []
         # Subtitles skipped under --skip-subtitle-errors, recorded so an embedding caller can
         # report which weren't available without parsing the console output. See SkippedSubtitle.
         self.skipped_subtitles: list[SkippedSubtitle] = []
+        self.skipped_titles: list[SkippedTitle] = []
+        # Why a missing track or language stopped the run, for the API job error.
+        self.stop_reason: Optional[str] = None
         # result() catches a download-worker failure, reports it, and returns rather than
         # re-raising (so the CLI still exits cleanly). Keep it so an embedding caller (the API
         # worker) can tell the title did not complete instead of reading it as a success.
@@ -1310,6 +1432,7 @@ class dl:
         imdb_id = ctx.params.get("imdb_id", imdb_id)
         tvdb_id = ctx.params.get("tvdb_id", tvdb_id)
         tvdb_order = ctx.params.get("tvdb_order", tvdb_order)
+        continuous_episodes = ctx.params.get("continuous_episodes", continuous_episodes)
         anilist_id = ctx.params.get("anilist_id", anilist_id)
         enrich = ctx.params.get("enrich", enrich)
         daily = ctx.params.get("daily", daily)
@@ -1325,6 +1448,7 @@ class dl:
         self.tvdb_order = (tvdb_order or config.tvdb_order or "").lower()
         if self.tvdb_order and self.tvdb_order not in SEASON_TYPES:
             raise click.UsageError(f"tvdb_order must be one of {', '.join(SEASON_TYPES)}, not {self.tvdb_order!r}")
+        self.continuous_episodes = continuous_episodes
         self.enrich = enrich
         self.daily = daily
         self.output_dir = output_dir
@@ -1570,14 +1694,18 @@ class dl:
             proxy, no_proxy = ctx.params.get("proxy"), bool(ctx.params.get("no_proxy"))
 
         # A server on this machine can reach a local proxy, so only a server elsewhere is guarded
-        self.remote_needs_public_proxy = self.is_remote and not is_loopback(server_url(ctx.params.get("server")))
+        self.remote_needs_public_proxy = (
+            self.is_remote
+            and not ctx.params.get("local_proxy")
+            and not is_loopback(server_url(ctx.params.get("server")))
+        )
 
         self.proxy_providers = []
         if no_proxy:
             ctx.params["proxy"] = None
         else:
             if self.remote_needs_public_proxy and proxy and proxy.lower().startswith("gluetun:"):
-                raise click.UsageError("Gluetun runs on your machine, so --remote cannot use it.")
+                raise click.UsageError("Gluetun runs on your machine, so --remote needs --local-proxy to use it.")
             if proxy_providers is not None:
                 self.proxy_providers = list(proxy_providers)
             else:
@@ -1664,11 +1792,13 @@ class dl:
         require_audio: list[str],
         require_video: list[str],
         require_subs: list[str],
+        skip_missing: bool,
         forced_subs: bool,
         forced_subs_only: bool,
         forced_s_lang: list[str],
         exact_lang: bool,
         sub_format: Optional[Union[Subtitle.Codec, str]],
+        sub_font: Optional[str],
         video_only: bool,
         audio_only: bool,
         subs_only: bool,
@@ -1900,18 +2030,27 @@ class dl:
             self.log.error("--select-titles and -w/--wanted cannot be used together")
             sys.exit(1)
 
+        try:
+            sub_format, ass_style = subtitle_look(
+                sub_format,
+                sub_font,
+                config.subtitle.get("ass_style"),
+                typed_font="sub_font" in self.typed_params,
+                typed_format="sub_format" in self.typed_params,
+            )
+        except ValueError as e:
+            self.log.error(str(e))
+            sys.exit(1)
+
+        if generate_dv and Video.Range.DV in range_ and Video.Range.HYBRID not in range_:
+            self.log.warning("--generate-dv ignored: DV is in the selected ranges")
+        range_, generated_dv_bases = generated_dv_ranges(range_, generate_dv)
         if any(r == Video.Range.HYBRID for r in range_):
             from unshackle.core.binaries import DoviTool
 
             if not DoviTool:
                 self.log.error("Unable to run hybrid mode: dovi_tool not found")
                 sys.exit(1)
-            if generate_dv:
-                from unshackle.core.binaries import HDR10PlusTool
-
-                if not HDR10PlusTool:
-                    self.log.error("Unable to run --generate-dv: hdr10plus_tool not found")
-                    sys.exit(1)
 
         if cdm_only is None:
             vaults_only = None
@@ -2050,8 +2189,11 @@ class dl:
         if self.tvdb_order and isinstance(titles, Series):
             titles = self.apply_tvdb_order(titles, title_cacher, cache_title_id, cache_region, cache_account_hash)
 
+        if self.continuous_episodes and isinstance(titles, Series):
+            titles = self.apply_continuous_episodes(titles)
+
         console.print(Padding(Rule(f"[rule.text]{titles.__class__.__name__}: {titles}"), (1, 2)))
-        console.print(Padding(titles.tree(verbose=list_titles), (0, 5)))
+        print_listing(titles.tree(verbose=list_titles))
 
         if list_titles:
             return
@@ -2234,16 +2376,21 @@ class dl:
                 for folder, context in post_script_last.get(group_key, {}).items():
                     dispatch("success", "season", season_context(context, folder), postscript)
 
-        def skip_title(title: Any, reason: str) -> None:
-            """Skip a title that has no track of the kind an only flag selects.
+        def skip_title(title: Any, reason: str, kind_only: bool = False) -> None:
+            """Skip a title that has no track the selection asks for, and report it to the API job.
 
-            A run with one title stops instead, because it has nothing else to download.
+            Only a kind-only miss (-ado, -fso, no track left) skips without --skip-missing; any other miss
+            stops the run. A run with one title always stops, because it has nothing else to download.
             """
-            if wanted_total <= 1:
-                self.log.error(reason)
+            if wanted_total <= 1 or not (kind_only or skip_missing):
+                self.stop_reason = f"{title}: {reason}"
+                self.log.error(self.stop_reason)
                 sys.exit(1)
-            self.log.warning(f"{reason} Skipping {title}")
-            if not no_mux:
+            self.skipped_titles.append(SkippedTitle(title=str(title), reason=reason))
+            if progress_sink:
+                progress_sink({"skipped_titles": list(self.skipped_titles)})
+            self.log.warning(f"Skipping {title}: {reason}")
+            if not mux_skipped(no_mux, title):
                 settle_post_script_group(title)
 
         for i, title in enumerate(titles):
@@ -2482,7 +2629,7 @@ class dl:
 
             if list_:
                 available_tracks, _ = title.tracks.tree()
-                console.print(Padding(listing_panel(available_tracks, "Available Tracks"), (0, 5)))
+                print_listing(listing_panel(available_tracks, "Available Tracks"))
                 continue
 
             keep_videos = True
@@ -2527,6 +2674,7 @@ class dl:
             elif proxy_download:
                 console.log(f"Using a separate proxy for downloads: {mask_proxy(proxy_download)}")
 
+            missing_required: list[str] = []
             for kind, required, available in (
                 (
                     "audio",
@@ -2538,13 +2686,18 @@ class dl:
                 (
                     "subtitle",
                     require_subs if keep_subtitles else [],
-                    [t.language for t in title.tracks.subtitles if t.forced or not forced_subs_only],
+                    [
+                        t.language
+                        for t in title.tracks.subtitles
+                        if (t.forced if forced_subs_only else forced_subs or not t.forced)
+                    ],
                 ),
             ):
-                missing_required = missing_required_langs(required, available, title.language, exact=exact_lang)
-                if missing_required:
-                    self.log.error(f"Required {kind} language(s) not found: {', '.join(missing_required)}")
-                    sys.exit(1)
+                if missing := missing_required_langs(required, available, title.language, exact=exact_lang):
+                    missing_required.append(f"Required {kind} language(s) not found: {', '.join(missing)}")
+            if missing_required:
+                skip_title(title, "; ".join(missing_required))
+                continue
 
             if not keep_videos:
                 title.tracks.videos = []
@@ -2572,10 +2725,18 @@ class dl:
                         for codec in missing_codecs:
                             self.log.warning(f"Skipping {codec.name} video tracks as none are available.")
                         if not title.tracks.videos:
-                            self.log.error(f"There's no {', '.join(c.name for c in vcodec)} Video Track...")
-                            sys.exit(1)
+                            skip_title(title, f"There's no {', '.join(c.name for c in vcodec)} Video Track...")
+                            continue
                     elif keep_videos:
                         title.tracks.select_video(lambda x: x.codec != Video.Codec.LCEVC)
+
+                    if keep_videos and generated_dv_bases:
+                        title.tracks.videos = keep_generated_dv_bases(title.tracks.videos, generated_dv_bases)
+                        if not any(v.range in generated_dv_bases for v in title.tracks.videos):
+                            skip_title(
+                                title, f"There's no {', '.join(r.name for r in generated_dv_bases)} Video Track..."
+                            )
+                            continue
 
                     if keep_videos and range_:
                         # Special handling for HYBRID - don't filter, keep all HDR10 and DV tracks
@@ -2588,8 +2749,8 @@ class dl:
                             if Video.Range.HDR10P in missing_ranges and dv_has_hdr10p:
                                 self.log.warning("A DV track carries HDR10+: use -r DV or -r HYBRID.")
                             if not title.tracks.videos:
-                                self.log.error(f"There's no {', '.join(r.name for r in range_)} Video Track...")
-                                sys.exit(1)
+                                skip_title(title, f"There's no {', '.join(r.name for r in range_)} Video Track...")
+                                continue
 
                     if keep_videos and vbitrate:
                         if any(r == Video.Range.HYBRID for r in range_):
@@ -2599,21 +2760,21 @@ class dl:
                                 lambda x: x.range == Video.Range.DV or bool(x.bitrate and x.bitrate // 1000 == vbitrate)
                             )
                             if not any(x.range != Video.Range.DV for x in title.tracks.videos):
-                                self.log.error(f"There's no {vbitrate}kbps Video Track...")
-                                sys.exit(1)
+                                skip_title(title, f"There's no {vbitrate}kbps Video Track...")
+                                continue
                         else:
                             title.tracks.select_video(lambda x: bool(x.bitrate and x.bitrate // 1000 == vbitrate))
                             if not title.tracks.videos:
-                                self.log.error(f"There's no {vbitrate}kbps Video Track...")
-                                sys.exit(1)
+                                skip_title(title, f"There's no {vbitrate}kbps Video Track...")
+                                continue
 
                     if keep_videos and vbitrate_min is not None and vbitrate_max is not None:
                         title.tracks.select_video(
                             lambda x: bool(x.bitrate and vbitrate_min <= x.bitrate // 1000 <= vbitrate_max)
                         )
                         if not title.tracks.videos:
-                            self.log.error(f"No Video Track in {vbitrate_min}-{vbitrate_max}kbps range...")
-                            sys.exit(1)
+                            skip_title(title, f"No Video Track in {vbitrate_min}-{vbitrate_max}kbps range...")
+                            continue
 
                     if keep_videos and video_excl_r:
                         drop = matched_language_tags(
@@ -2621,8 +2782,8 @@ class dl:
                         )
                         title.tracks.select_video(lambda x: str(x.language) not in drop)
                         if not title.tracks.videos:
-                            self.log.error(f"Every Video Track was excluded by -{', -'.join(video_excl_r)}...")
-                            sys.exit(1)
+                            skip_title(title, f"Every Video Track was excluded by -{', -'.join(video_excl_r)}...")
+                            continue
 
                     effective_video_lang = v_lang or lang
                     video_languages = [lang for lang in effective_video_lang if lang != "best"]
@@ -2631,16 +2792,11 @@ class dl:
                     )
                     if keep_videos and video_languages and "all" not in video_languages:
                         processed_video_lang = resolve_sort_langs(video_languages, title.language, exact=exact_lang)
-                        v_orig_token: Optional[str] = None
-                        if "orig" in video_languages:
-                            if title.language:
-                                v_orig_token = original_tag(title.language, exact_lang)
-                            else:
-                                self.log.warning(
-                                    "Original language not available for title, skipping 'orig' selection for video"
-                                )
-                        if v_orig_token in video_languages:
-                            v_orig_token = None
+                        v_orig_token = orig_token(video_languages, title.language, exact_lang)
+                        if "orig" in video_languages and not title.language:
+                            self.log.warning(
+                                "Original language not available for title, skipping 'orig' selection for video"
+                            )
                         missing_v_langs = find_missing_langs(
                             processed_video_lang,
                             [v.language for v in title.tracks.videos],
@@ -2657,20 +2813,23 @@ class dl:
                                     )
                                     processed_video_lang = remaining_v_langs
                                 else:
-                                    self.log.error(f"{missing_str} not found in video tracks and no fallback available")
-                                    sys.exit(1)
+                                    skip_title(
+                                        title, f"{missing_str} not found in video tracks and no fallback available"
+                                    )
+                                    continue
                             else:
-                                self.log.error(missing_str + " not found in video tracks")
-                                sys.exit(1)
+                                skip_title(title, missing_str + " not found in video tracks")
+                                continue
                         title.tracks.videos = title.tracks.by_language(
                             title.tracks.videos, processed_video_lang, exact_match=exact_lang
                         )
                         if not title.tracks.videos:
                             # empty only when 'orig' was the sole request and did not resolve
-                            self.log.error(
-                                f"There's no {as_requested(processed_video_lang, v_orig_token) or 'orig'} Video Track..."
+                            skip_title(
+                                title,
+                                f"There's no {as_requested(processed_video_lang, v_orig_token) or 'orig'} Video Track...",
                             )
-                            sys.exit(1)
+                            continue
 
                     has_hybrid = any(r == Video.Range.HYBRID for r in range_)
                     non_hybrid_ranges: list[Video.Range] = [r for r in range_ if r != Video.Range.HYBRID]
@@ -2735,8 +2894,8 @@ class dl:
                                     f"There's no {res_list} Video Track{plural}, continuing with available qualities..."
                                 )
                             else:
-                                self.log.error(f"There's no {res_list} Video Track{plural}...")
-                                sys.exit(1)
+                                skip_title(title, f"There's no {res_list} Video Track{plural}...")
+                                continue
 
                     pre_hybrid_videos: list[Video] = list(title.tracks.videos) if has_hybrid else []
                     if keep_videos and has_hybrid:
@@ -2777,7 +2936,7 @@ class dl:
                                     and (not codec or t.codec == codec)
                                     and (vlang is None or str(t.language) == vlang)
                                 ]
-                                match = candidates[-1] if worst and candidates else next(iter(candidates), None)
+                                match = pick_video(candidates, worst)
                                 if match and match not in non_hybrid_selected:
                                     non_hybrid_selected.append(match)
 
@@ -2806,7 +2965,7 @@ class dl:
                                 and (not codec or t.codec == codec)
                                 and (vlang is None or str(t.language) == vlang)
                             ]
-                            match = candidates[-1] if worst and candidates else next(iter(candidates), None)
+                            match = pick_video(candidates, worst)
                             if match and match not in selected_videos:
                                 selected_videos.append(match)
                         title.tracks.videos = selected_videos
@@ -2816,7 +2975,7 @@ class dl:
                         if not gate_failure and not any(
                             v.range == Video.Range.DV or v.native_hybrid for v in title.tracks.videos
                         ):
-                            self.log.info("No Dolby Vision track: Dolby Vision will be generated from HDR10+")
+                            self.log.info("No Dolby Vision track: Dolby Vision will be generated")
 
                         if gate_failure:
                             other_ranges: list[Video.Range] = [r for r in range_ if r != Video.Range.HYBRID]
@@ -2844,13 +3003,13 @@ class dl:
                                         and (not codec or t.codec == codec)
                                         and (vlang is None or str(t.language) == vlang)
                                     ]
-                                    match = candidates[-1] if worst and candidates else next(iter(candidates), None)
+                                    match = pick_video(candidates, worst)
                                     if match and match not in fallback_selected:
                                         fallback_selected.append(match)
                                 title.tracks.videos = fallback_selected
                             else:
-                                self.log.error(gate_failure)
-                                sys.exit(1)
+                                skip_title(title, gate_failure)
+                                continue
 
                     fsl = resolve_sort_langs(forced_s_lang, title.language, exact=exact_lang)
                     if keep_subtitles and s_excl_r:
@@ -2860,6 +3019,7 @@ class dl:
                         )
                         title.tracks.select_subtitles(lambda x: str(x.language) not in drop)
                     if keep_subtitles and s_lang and "all" not in s_lang:
+                        s_orig_token = orig_token(s_lang, title.language, exact_lang)
                         s_lang = resolve_sort_langs(s_lang, title.language, exact=exact_lang)
                         # the pool selection draws from: forced tracks count only when -fs keeps them
                         missing_langs = find_missing_langs(
@@ -2868,25 +3028,15 @@ class dl:
                             exact=exact_lang,
                         )
                         if missing_langs:
-                            missing_str = ", ".join(missing_langs)
-                            if best_available:
-                                remaining = [tok for tok in s_lang if tok not in missing_langs]
-                                if remaining:
-                                    self.log.warning(
-                                        f"{missing_str} not found in subtitle tracks, continuing with: {', '.join(remaining)}"
-                                    )
-                                    s_lang = remaining
-                                else:
-                                    self.log.warning(
-                                        f"{missing_str} not found in subtitle tracks, continuing without subtitles"
-                                    )
-                                    fsl_tags = matched_language_tags(
-                                        fsl, [x.language for x in title.tracks.subtitles if x.forced], exact_lang
-                                    )
-                                    title.tracks.select_subtitles(lambda x: x.forced and str(x.language) in fsl_tags)
-                            else:
-                                self.log.error(missing_str + " not found in subtitle tracks")
-                                sys.exit(1)
+                            remaining = [tok for tok in s_lang if tok not in missing_langs]
+                            tail = (
+                                f"continuing with: {as_requested(remaining, s_orig_token)}"
+                                if remaining
+                                else "continuing without subtitles"
+                            )
+                            self.log.warning(
+                                f"{as_requested(missing_langs, s_orig_token)} not found in subtitle tracks, {tail}"
+                            )
 
                         if s_lang and title.tracks.subtitles:
                             plain_tags = plain_subtitle_tags(s_lang, title.tracks.subtitles, exact_lang)
@@ -2896,9 +3046,6 @@ class dl:
                             title.tracks.select_subtitles(
                                 lambda x: str(x.language) in (forced_tags if x.forced else plain_tags)
                             )
-                            if not title.tracks.subtitles and not best_available:
-                                self.log.error(f"There's no {s_lang} Subtitle Track...")
-                                sys.exit(1)
 
                     if keep_subtitles:
                         # fsl, not forced_s_lang: unresolvable orig must keep all forced, not drop them
@@ -2924,27 +3071,31 @@ class dl:
                         if forced_subs_only:
                             title.tracks.select_subtitles(lambda x: x.forced)
                             if not title.tracks.subtitles:
-                                skip_title(title, "There's no forced subtitle track for the selected languages.")
+                                skip_title(
+                                    title,
+                                    "There's no forced subtitle track for the selected languages.",
+                                    kind_only=True,
+                                )
                                 continue
 
                 if keep_audio and audio_description_only:
                     title.tracks.select_audio(lambda x: x.descriptive)
                     if not title.tracks.audio:
-                        skip_title(title, "There's no audio description track.")
+                        skip_title(title, "There's no audio description track.", kind_only=True)
                         continue
                 # might have no audio tracks if part of the video, e.g. transport stream hls
                 if keep_audio and len(title.tracks.audio) > 0:
                     if not audio_description:
                         title.tracks.select_audio(lambda x: not x.descriptive)
                         if not title.tracks.audio:
-                            self.log.error("Audio description only, use --audio-description...")
-                            sys.exit(1)
+                            skip_title(title, "Audio description only, use --audio-description...")
+                            continue
                     if acodec:
                         title.tracks.select_audio(lambda x: x.codec in acodec)
                         if not title.tracks.audio:
                             codec_names = ", ".join(c.name for c in acodec)
-                            self.log.error(f"No audio tracks matching codecs: {codec_names}")
-                            sys.exit(1)
+                            skip_title(title, f"No audio tracks matching codecs: {codec_names}")
+                            continue
                     if channels:
                         title.tracks.select_audio(
                             lambda x: bool(
@@ -2952,44 +3103,39 @@ class dl:
                             )
                         )
                         if not title.tracks.audio:
-                            self.log.error(f"There's no {channels} Audio Track...")
-                            sys.exit(1)
+                            skip_title(title, f"There's no {channels} Audio Track...")
+                            continue
                     if no_atmos:
                         title.tracks.audio = [x for x in title.tracks.audio if not x.atmos]
                         if not title.tracks.audio:
-                            self.log.error("No non-Atmos audio tracks available...")
-                            sys.exit(1)
+                            skip_title(title, "No non-Atmos audio tracks available...")
+                            continue
                     if abitrate:
                         title.tracks.select_audio(lambda x: x.bitrate and x.bitrate // 1000 == abitrate)
                         if not title.tracks.audio:
-                            self.log.error(f"There's no {abitrate}kbps Audio Track...")
-                            sys.exit(1)
+                            skip_title(title, f"There's no {abitrate}kbps Audio Track...")
+                            continue
                     if abitrate_min is not None and abitrate_max is not None:
                         title.tracks.select_audio(
                             lambda x: x.bitrate and abitrate_min <= x.bitrate // 1000 <= abitrate_max
                         )
                         if not title.tracks.audio:
-                            self.log.error(f"No Audio Track in {abitrate_min}-{abitrate_max}kbps range...")
-                            sys.exit(1)
+                            skip_title(title, f"No Audio Track in {abitrate_min}-{abitrate_max}kbps range...")
+                            continue
                     if audio_excl_r:
                         drop = matched_language_tags(
                             audio_excl_r, [t.language for t in title.tracks.audio], exact_lang, every_variant=True
                         )
                         title.tracks.select_audio(lambda x: str(x.language) not in drop)
                         if not title.tracks.audio:
-                            self.log.error(f"Every Audio Track was excluded by -{', -'.join(audio_excl_r)}...")
-                            sys.exit(1)
+                            skip_title(title, f"Every Audio Track was excluded by -{', -'.join(audio_excl_r)}...")
+                            continue
                     audio_languages = a_lang or lang
                     if audio_languages:
                         processed_lang = resolve_sort_langs(audio_languages, title.language, exact=exact_lang)
-                        a_orig_token: Optional[str] = None
-                        if "orig" in audio_languages:
-                            if title.language:
-                                a_orig_token = original_tag(title.language, exact_lang)
-                            else:
-                                self.log.warning("Original language not available for title, skipping 'orig' selection")
-                        if a_orig_token in audio_languages:
-                            a_orig_token = None
+                        a_orig_token = orig_token(audio_languages, title.language, exact_lang)
+                        if "orig" in audio_languages and not title.language:
+                            self.log.warning("Original language not available for title, skipping 'orig' selection")
 
                         embedded_langs = embedded_audio_langs(
                             title.tracks.videos, keep_videos and not audio_description_only
@@ -3013,13 +3159,13 @@ class dl:
                                         )
                                         processed_lang = remaining
                                     else:
-                                        self.log.error(
-                                            f"{missing_str} not found in {audio_noun} and no fallback available"
+                                        skip_title(
+                                            title, f"{missing_str} not found in {audio_noun} and no fallback available"
                                         )
-                                        sys.exit(1)
+                                        continue
                                 else:
-                                    self.log.error(f"{missing_str} not found in {audio_noun}")
-                                    sys.exit(1)
+                                    skip_title(title, f"{missing_str} not found in {audio_noun}")
+                                    continue
 
                         title.tracks.audio = select_best_audio(
                             title.tracks.audio, processed_lang, acodec, audio_description, exact_lang
@@ -3027,11 +3173,11 @@ class dl:
                         if not title.tracks.audio and not embedded_langs:
                             # empty when 'orig' was the sole request, did not resolve, and the
                             # video carries no audio of its own to fall back on
-                            self.log.error(
-                                f"There's no {as_requested(processed_lang, a_orig_token) or 'orig'} "
-                                f"Audio Track, cannot continue..."
+                            skip_title(
+                                title,
+                                f"There's no {as_requested(processed_lang, a_orig_token) or 'orig'} Audio Track...",
                             )
-                            sys.exit(1)
+                            continue
 
                 kept_tracks = []
                 if keep_videos:
@@ -3046,6 +3192,9 @@ class dl:
                     kept_tracks.extend(title.tracks.attachments)
 
                 title.tracks = Tracks(kept_tracks, manifest_url=title.tracks.manifest_url)
+                if not (title.tracks.videos or title.tracks.audio or title.tracks.subtitles or title.tracks.chapters):
+                    skip_title(title, "There's no track left for the selected options.", kind_only=True)
+                    continue
 
             selected_tracks, tracks_progress_callables = title.tracks.tree(add_progress=True)
 
@@ -3319,9 +3468,13 @@ class dl:
                             shutil.copy2(subtitle.path, original_path)
                             sidecar_original_paths[subtitle.id] = original_path
 
+                set_subtitle_look(title.tracks.subtitles, ass_style, title.tracks.videos)
                 with console.status("Converting Subtitles..."):
                     sub_conversions: dict[tuple[str, str], int] = {}
                     for subtitle in title.tracks.subtitles:
+                        if subtitle.codec == Subtitle.Codec.SCC:
+                            scc_dst = convert_scc(subtitle, sub_format).name
+                            sub_conversions[("SCC", scc_dst)] = sub_conversions.get(("SCC", scc_dst), 0) + 1
                         if sub_format == "original":
                             continue
                         if sub_format:
@@ -3364,13 +3517,9 @@ class dl:
                         self.suggest_missing_fonts(missing_fonts)
 
                 # Handle DRM decryption BEFORE repacking (must decrypt first!)
-                service_name = service.__class__.__name__.upper()
-                decryption_method = resolve_decryption(config.decryption_map, config.decryption, service_name)
-                decrypt_tool = "mp4decrypt" if decryption_method.lower() == "mp4decrypt" else "Shaka Packager"
-
                 drm_tracks = [track for track in title.tracks if track.drm]
                 if drm_tracks:
-                    with console.status(f"Decrypting tracks with {decrypt_tool}..."):
+                    with console.status("Decrypting tracks..."):
                         has_decrypted = False
                         for track in drm_tracks:
                             drm = track.get_drm_for_cdm(self.cdm)
@@ -3386,7 +3535,7 @@ class dl:
                                     f"No matching DRM found for track {track} with CDM type {type(self.cdm).__name__}"
                                 )
                         if has_decrypted:
-                            self.log.info(f"Decrypted tracks with {decrypt_tool}")
+                            self.log.info("Decrypted tracks")
 
                 if (
                     not no_subs
@@ -3464,16 +3613,20 @@ class dl:
                         except Exception as e:  # noqa: BLE001
                             self.log.warning(f"VUI normalization skipped for {track.id}: {e}")
 
-                remux_music_tracks(title, self.log)
-                if sample:
-                    cut_music_sample(title, sample, self.log)
+                remux_music_tracks(title, self.log, sample)
 
                 muxed_paths = []
                 muxed_audio_codecs: dict[Path, Optional[Audio.Codec]] = {}
                 tagged_paths: set[Path] = set()
                 append_audio_codec_suffix = True
+                skip_mux = mux_skipped(no_mux, title)
+                kept_audio = [] if skip_mux else take_unmuxable_audio(title.tracks, self.log)
+                if kept_audio and not title.tracks:
+                    title.tracks.audio = kept_audio
+                    kept_audio = []
+                    skip_mux = True
 
-                if no_mux:
+                if skip_mux:
                     for track in title.tracks:
                         if track.path and track.path.exists():
                             muxed_paths.append(track.path)
@@ -3654,11 +3807,6 @@ class dl:
                                         hybrid_output_path = config.directories.temp / hybrid_filename
                                         hybrid_temp_paths.append(hybrid_output_path)
 
-                                        if len({track.sample_start for track in resolution_tracks}) > 1:
-                                            raise click.ClickException(
-                                                "--sample cut the HDR10 and Dolby Vision tracks at different "
-                                                "points, so a hybrid of them would not line up."
-                                            )
                                         step_error = hybrid_step_error(resolution_tracks, self.service, hybrid_filename)
                                         if step_error:
                                             # the other files of the title are already queued for muxing
@@ -3805,7 +3953,7 @@ class dl:
                 else:
                     muxed_paths.extend(track.path for track in title.tracks.audio if track.path and track.path.exists())
 
-                if no_mux:
+                if skip_mux:
                     final_dir = self.output_dir or config.directories.downloads
                     if not no_folder and (
                         isinstance(title, (Episode, Song))
@@ -3828,6 +3976,7 @@ class dl:
                     final_dir.mkdir(parents=True, exist_ok=True)
 
                     for track_path in muxed_paths:
+                        fix_data_reference_indexes(track_path)
                         media_info = MediaInfo.parse(track_path)
                         base_filename = title.get_filename(media_info, show_service=not no_source)
                         if sample:
@@ -3835,22 +3984,8 @@ class dl:
 
                         track = next((t for t in title.tracks if t.path == track_path), None)
                         if track:
-                            if isinstance(track, Video):
-                                track_suffix = f".{track.codec.name if track.codec is not None else 'video'}"
-                            elif isinstance(track, Audio):
-                                lang_suffix = f".{track.language}" if track.language else ""
-                                track_suffix = (
-                                    f"{lang_suffix}.{track.codec.name if track.codec is not None else 'audio'}"
-                                )
-                            elif isinstance(track, Subtitle):
-                                lang_suffix = f".{track.language}" if track.language else ""
-                                forced_suffix = ".forced" if track.forced else ""
-                                sdh_suffix = ".sdh" if track.sdh else ""
-                                track_suffix = f"{lang_suffix}{forced_suffix}{sdh_suffix}"
-                            else:
-                                track_suffix = ""
-
-                            final_path = final_dir / f"{base_filename}{track_suffix}{track_path.suffix}"
+                            ext = no_mux_extension(track, track_path, media_info)
+                            final_path = final_dir / f"{base_filename}{track_file_suffix(track)}{ext}"
                         else:
                             final_path = final_dir / f"{base_filename}{track_path.suffix}"
 
@@ -3896,6 +4031,16 @@ class dl:
                             shutil.move(muxed_path, final_path)
                         used_final_paths.add(final_path)
                         self.completed_files.append(final_path)
+                        for kept in kept_audio:
+                            assert kept.path is not None
+                            kept_path = final_path.with_name(
+                                f"{final_path.stem}{track_file_suffix(kept)}{kept.path.suffix}"
+                            )
+                            shutil.move(kept.path, kept_path)
+                            self.completed_files.append(kept_path)
+                            sidecar_files.setdefault(muxed_path, []).append(kept_path)
+                            self.log.info(f"Saved {kept_path.name}: no muxer carries Audio Vivid")
+                        kept_audio = []
                         if muxed_path not in tagged_paths:
                             tags.tag_file(
                                 final_path,
@@ -3931,7 +4076,7 @@ class dl:
                         if final_path.parent not in post_script_folders:
                             post_script_folders.append(final_path.parent)
 
-                if not no_mux:
+                if not skip_mux:
                     settle_post_script_group(title)
 
                 title_dl_time = time_elapsed_since(dl_start_time)
@@ -3963,6 +4108,13 @@ class dl:
         self.wait_vault_writes()
         if export_path:
             self.log_export_summary()
+        if self.skipped_titles:
+            if len(self.skipped_titles) == wanted_total:
+                self.stop_reason = f"Skipped all {wanted_total} titles"
+                self.log.error(self.stop_reason)
+                sys.exit(1)
+            skipped = ", ".join(t["title"] for t in self.skipped_titles)
+            self.log.warning(f"Skipped {len(self.skipped_titles)} of {wanted_total} titles: {skipped}")
         dl_time = time_elapsed_since(start_time)
 
         console.print(Padding(f"Processed all titles in [progress.elapsed]{dl_time}", (0, 5, 1, 5)))
@@ -3971,7 +4123,11 @@ class dl:
         """Cut a 60 second sample from a finished file into a ``Sample`` folder next to it.
 
         The sample starts 2 minutes in. A file shorter than 3 minutes gives its middle 60 seconds.
+        mkvmerge cuts only Matroska: an MP4 (3D video, or audio Matroska cannot carry) gets no sample.
         """
+        if source.suffix.lower() != ".mkv":
+            self.log.warning(f"No sample for {source.name}: mkvmerge cuts only Matroska files")
+            return
         duration = float(media_info.general_tracks[0].duration or 0) / 1000
         start: float
         start, end = DEFAULT_SAMPLE
@@ -4099,6 +4255,26 @@ class dl:
 
         if filled:
             self.log.info("Filled absolute numbers for %d episode(s) from TVDB (ID %s).", filled, tvdb_id)
+
+    def apply_continuous_episodes(self, titles: Series) -> Series:
+        """Number each season on from the last episode of the season before it.
+
+        Season 0 and episode 0 keep their numbers, and a season that already starts past the season before it is kept.
+        The Series is rebuilt, as it does not re-sort an episode whose number changed.
+        """
+        last = 0
+        renumbered = 0
+        for season, group in groupby(titles, key=attrgetter("season")):
+            episodes = [t for t in group if t.number]
+            if not season or not episodes:
+                continue
+            if min(t.number for t in episodes) <= last:
+                for t in episodes:
+                    t.number += last
+                renumbered += len(episodes)
+            last = max(t.number for t in episodes)
+        self.log.info("Numbered %d episode(s) on from the season before.", renumbered)
+        return type(titles)(list(titles))
 
     def apply_tvdb_order(
         self,
@@ -4419,6 +4595,8 @@ class dl:
             }
             if isinstance(t, Video):
                 row.update(width=t.width, height=t.height, range=t.range.name.lower() if t.range else "")
+                if t.stereo:
+                    row["stereo"] = True
             elif isinstance(t, Audio):
                 row.update(channels=str(t.channels) if t.channels else "", atmos=bool(t.joc), descriptive=t.descriptive)
             elif isinstance(t, Subtitle):
@@ -4515,6 +4693,9 @@ class dl:
 
         With ``decrypt=False`` the downloader already decrypted the segments in place, so a
         failure can only flag and raise; the next run skips the flagged pair.
+
+        Before the decrypt, each KID the DRM names without a content key is licensed when the file
+        uses it, or when the file cannot be mapped, because ``prepare_drm`` licensed only for the track's KID.
         """
         keys: Any = getattr(drm, "content_keys", None)
         if keys is None:
@@ -4566,6 +4747,15 @@ class dl:
         if known_bad and licence:
             relicense({kid: drop(kid) for kid in known_bad}, {})
 
+        unkeyed = [kid for kid in getattr(drm, "kids", None) or [] if kid not in keys]
+        mapped = bool(unkeyed and decrypt and licence)
+        kid_map = verify.kid_windows(path) if mapped else None
+        if mapped and licence:
+            for kid in unkeyed:
+                if kid_map is None or kid in kid_map.windows:
+                    licence(drm, track_kid=kid)
+            keys = getattr(drm, "content_keys", keys)
+
         def vault_kids() -> dict[UUID, Vault]:
             """The KIDs whose key on the track came from a vault, with that vault."""
             found = {kid: self.vaults.sources.get(kid) for kid in keys}
@@ -4579,7 +4769,7 @@ class dl:
                 os.link(path, backup)
             except OSError as e:
                 self.log.debug(f"Cannot keep the ciphertext for a decrypt retry: {e!r}")
-        kid_map = verify.kid_windows(path) if checking else None
+        kid_map = (kid_map if mapped else verify.kid_windows(path)) if checking else None
         windows = kid_map.windows if kid_map else {}
         video = kid_map.video if kid_map else None
 
@@ -4896,6 +5086,8 @@ class dl:
     ) -> None:
         """Give a Widevine, PlayReady or ClearKey DRM its content keys: run cache, then key vaults, then ``get_keys``.
 
+        A held key for ``track_kid`` skips the licence, as the file is encrypted with that KID;
+        ``decrypt_verified`` licenses any other KID the file turns out to use.
         ``force`` skips the run cache, so the licence runs again for each KID no vault answers.
         A licence can answer a KID with a blank or null key; a vault key for that KID wins.
         """
@@ -4951,7 +5143,7 @@ class dl:
                 show_error(msg)
                 raise drm.Exceptions.CEKNotFound(msg)
 
-            need_license = bool(missing)
+            need_license = bool(missing) and (force or not track_kid or track_kid not in drm.content_keys)
             if need_license:
                 # force licenses again, so the turn takes no cached keys
                 self.take_licence_turn(licence_turn, drm, [] if force else all_kids, track, track_kid, cek_tree)
@@ -4973,8 +5165,10 @@ class dl:
                 try:
                     get_keys()
                 except Exception as e:
-                    if drm.content_keys:
-                        self.log.debug(f"License call failed but keys already in content_keys: {e}")
+                    if drm.content_keys and (not track_kid or track_kid in drm.content_keys):
+                        self.log.warning(
+                            f"Licence failed, using the {len(drm.content_keys)} known key(s): {redact_secrets(str(e))}"
+                        )
                     else:
                         if isinstance(e, (drm.Exceptions.EmptyLicense, drm.Exceptions.CEKNotFound)):
                             msg = str(e)
@@ -4993,18 +5187,19 @@ class dl:
                             )
                         show_error(msg)
                         raise
+                else:
+                    log_event(
+                        "license_keys_retrieved",
+                        level="INFO",
+                        service=self.service,
+                        context={
+                            "track": str(track),
+                            "drm_type": type(drm).__name__,
+                            "keys_count": len(drm.content_keys),
+                            "kids": [k.hex for k in drm.content_keys.keys()],
+                        },
+                    )
 
-                log_event(
-                    "license_keys_retrieved",
-                    level="INFO",
-                    service=self.service,
-                    context={
-                        "track": str(track),
-                        "drm_type": type(drm).__name__,
-                        "keys_count": len(drm.content_keys),
-                        "kids": [k.hex for k in drm.content_keys.keys()],
-                    },
-                )
                 for kid, key in drm.content_keys.items():
                     self.add_key_label(cek_tree, kid, f"[red]{key}[/]" if is_null_key(key) else key, track_kid)
                 drop_null_keys(drm)
@@ -5203,6 +5398,7 @@ class dl:
                         licence(
                             drm_system="playready" if drm.__class__.__name__ == "PlayReady" else "widevine",
                             challenge=b"",
+                            kid=track_kid,
                         )
                     except click.ClickException:
                         raise

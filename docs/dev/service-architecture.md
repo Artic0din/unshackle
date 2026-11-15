@@ -130,7 +130,7 @@ See [Proxies and VPN](../guide/proxies-and-vpn.md).
     `[Video.Range.SDR]`), `best_available`, and `generate_dv` (from `--generate-dv`).
     Use it in `get_tracks` to decide which variants to fetch. A service that fetches
     the HYBRID variants itself must also fetch HDR10P when `generate_dv` is set and
-    the title has no DV track, because the conversion needs an HEVC HDR10+ base.
+    the title has no DV track, because unshackle prefers an HEVC HDR10+ base.
 
 ## Titles and the `Title` hierarchy
 
@@ -202,7 +202,9 @@ Each subclass adds its own required fields on top of `id_` and `service`:
 
     The tagger also falls back to `Song.data` for fields the constructor did not get, such
     as the composer or a full release date. It reads the top level of that dict and a
-    nested `metadata` sub-dict, with the nested keys winning, so either shape works.
+    nested `metadata` sub-dict, with the nested keys winning, so either shape works. The keys
+    that a remote client gets back are `MUSIC_DATA_KEYS` in `unshackle/core/titles/music.py`,
+    for example `artists` (a list) and `replaygain_track_gain`.
 
     From `get_tracks()`, a music service gives **one `Audio` track for each codec and
     bitrate it offers for a `Song`**. The framework then selects one with its usual audio
@@ -216,13 +218,9 @@ Each subclass adds its own required fields on top of `id_` and `service`:
     `GROUP_AUDIO_DOWNLOADS` flag, `get_music_track_options` and `get_music_collection_label`
     no longer exist, and a music service does not need them.
 
-    !!! warning "Restore the container in `on_track_downloaded`"
-        Every track downloads to a temp file named `Audio_<id>.mp4` whatever it holds, and
-        the final move keeps that suffix. A `Song` skips the muxer, so its download **is**
-        the delivered file, and the tagger picks its metadata format from the suffix.
-        Rename the track path to the true container in `on_track_downloaded`, or a FLAC
-        lands as an untaggable `.mp4`. The event fires twice, once before decryption and
-        once at the end, so wait until `track.drm` is clear before you rename.
+    Core picks the container of a `Song` from the codec in the downloaded file, so a music
+    service does not rename the track path. Read
+    [Music output files](../guide/output-and-naming.md#music-output-files).
 
     The **MUSIC_EXAMPLE** reference service, at `unshackle/services/MUSIC_EXAMPLE/`, shows
     the full music surface.
@@ -279,8 +277,8 @@ do not give a `name`, unshackle derives a human-readable name from the language.
 closed-caption descriptors. The relevant enums:
 
 - **`Video.Codec`**: `AVC` (H.264), `HEVC` (H.265), `VC1`, `VP8`, `VP9`, `AV1`, `LCEVC`.
-- **`Video.Range`**: `SDR`, `HLG`, `HDR10`, `HDR10P` (HDR10+), `DV` (Dolby Vision), and
-  `HYBRID`. `HYBRID` is special: it tells the pipeline to select both an HDR10(+) base and
+- **`Video.Range`**: `SDR`, `HLG`, `HDR10`, `HDR10P` (HDR10+), `VIVID` (HDR Vivid), `DV` (Dolby
+  Vision), and `HYBRID`. `HYBRID` is special: it tells the pipeline to select both an HDR10(+) base and
   a DV track and merge the DV RPU onto the HDR10 track with `dovi_tool` (see
   [Dolby Vision hybrid](#dolby-vision-and-hybrid)).
 
@@ -292,7 +290,7 @@ closed-caption descriptors. The relevant enums:
 
 `Audio` adds `bitrate`, `channels`, `joc` (Joint Object Coding, the Atmos indicator),
 and `descriptive`. `Audio.Codec` covers `AAC`, `AC3` (`DD`), `EC3` (`DD+`), `AC4`,
-`OPUS`, `OGG` (Vorbis), `DTS`, `DTSX`, `DTSHD`, `MPEGH`, `ALAC`, `FLAC`, and `MP3`. The `atmos` property is `True` when
+`OPUS`, `OGG` (Vorbis), `DTS`, `DTSX`, `DTSHD`, `MPEGH`, `AV3A` (Audio Vivid), `ALAC`, `FLAC`, and `MP3`. The `atmos` property is `True` when
 `joc` is set (or when `extra` flags it).
 
 ### `Subtitle`
@@ -301,7 +299,7 @@ and `descriptive`. `Audio.Codec` covers `AAC`, `AC3` (`DD`), `EC3` (`DD+`), `AC4
 (subtitles for the deaf and hard-of-hearing), and `forced`. A track cannot be both `cc`
 and `sdh`, and `forced` cannot combine with either. `Subtitle.Codec` includes `SubRip`
 (SRT), `WebVTT` (VTT), `SubStationAlpha`/`SubStationAlphav4` (SSA/ASS),
-`TimedTextMarkupLang` (TTML), `SAMI`, and the box-encapsulated DASH formats `fTTML`
+`TimedTextMarkupLang` (TTML), `SAMI`, `SCC`, and the box-encapsulated DASH formats `fTTML`
 (STPP) and `fVTT` (WVTT). Subtitles receive post-download normalization
 (segment merging, WebVTT sanitization, format conversion, and optional SDH stripping),
 all documented for users in [Subtitles](../guide/subtitles.md).
@@ -454,6 +452,7 @@ Two DV mechanisms sit on top of the track model. **DV fixup** re-exposes DV sign
 HLS and DASH streams that carry a valid DV RPU but advertise plain HEVC, with DV only in the
 supplemental codecs (`dv_compatible_bitstream`). `--list` shows such a track as `HDR10+DV` or `HDR10P+DV`.
 A service sets `hdr10_base` on a DV track that has an HDR10 base layer (DV profile 8.1), and `--list` shows it as `DV+HDR10`.
+The HLS and DASH parsers set `stereo` on a stereoscopic 3D (MV-HEVC) track: an HLS `REQ-VIDEO-LAYOUT` that names `CH-STEREO`, or a DV profile 20 codec. `--list` shows it as `3D`.
 **Hybrid** processing (`Video.Range.HYBRID`) selects an HDR10(+) base and a DV donor,
 extracts the RPU with `dovi_tool`, and injects it onto the base layer, to make a single
 track that carries both HDR10 metadata and the DV RPU. Both are automatic once the

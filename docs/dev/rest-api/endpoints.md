@@ -339,7 +339,7 @@ When you give both `season` and `episode`, the server combines them into a `"{se
           "bitrate": 8000, "bitrate_bps": 8000000, "width": 3840, "height": 2160,
           "resolution": "2160p", "fps": "24", "range": "HDR10",
           "range_display": "HDR", "scan_type": null, "closed_captions": [],
-          "dv_compatible_bitstream": false, "hdr10plus": false, "hdr10_base": false, "language": "en",
+          "dv_compatible_bitstream": false, "hdr10plus": false, "hdr10_base": false, "stereo": false, "language": "en",
           "is_original_lang": true,
           "name": null, "track_name": "English", "needs_repack": false, "edition": [], "note": null, "data": null,
           "drm": [], "descriptor": "DASH"
@@ -450,15 +450,17 @@ Make a download job. It requires `service` and `title_id`. Every other field is 
 | `wanted` | string / string[] | `[]` | Episode/season selectors, as a list or as one comma-separated string. Accepts the part form, `"S01E01.2"`, and the air-date form, `"2026-08-11"` or `"2026-08-01:2026-08-31"`. For a music release, a selector is a track number, `"1-5"` or `"1,3,7"`, or `"{disc}x{track}"` such as `"2x3"`. |
 | `latest_episode` | boolean | `false` | Only the newest episode. |
 | `latest_episodes` | integer | `null` | Only the N newest episodes. A positive integer. When set, it overrides `latest_episode`. |
-| `lang` / `v_lang` / `a_lang` / `s_lang` | string[] | `["orig"]` / `[]` / `[]` / `["all"]` | Language filters. |
-| `require_audio` | string[] | `[]` | Audio languages that must exist. The job fails if one is missing, even with `best_available`. |
-| `require_video` | string[] | `[]` | Video languages that must exist. The job fails if one is missing, even with `best_available`. |
-| `require_subs` | string[] | `[]` | Subtitle languages that must exist. The job fails if one is missing. `s_lang` still decides what to keep. |
+| `lang` / `v_lang` / `a_lang` / `s_lang` | string[] | `["orig"]` / `[]` / `[]` / `["all"]` | Language filters. A missing `s_lang` language gives a warning and the job continues. |
+| `require_audio` | string[] | `[]` | Audio languages that must exist. The job fails if one is missing, even with `best_available`, or skips the title with `skip_missing`. |
+| `require_video` | string[] | `[]` | Video languages that must exist. The job fails if one is missing, even with `best_available`, or skips the title with `skip_missing`. |
+| `require_subs` | string[] | `[]` | Subtitle languages that must exist. The job fails if one is missing, or skips the title with `skip_missing`. `s_lang` still decides what to keep. |
+| `skip_missing` | boolean | `false` | Skip a title that misses a required language or track, and continue with the next title. The job's `skipped_titles` lists each skip. The job fails when it has one title or skips every title. |
 | `forced_subs` | boolean | `false` | Include forced subtitles. |
 | `forced_subs_only` | boolean | `false` | Download forced subtitles and no other subtitle; implies `forced_subs`. Not valid with `no_subs`, `video_only`, `audio_only` or `chapters_only`. |
 | `forced_s_lang` | string[] | `[]` | Forced subtitle language(s); implies `forced_subs`. |
 | `exact_lang` | boolean | `false` | A language tag without a region never falls back to another variant. A tag with a region is always exact. |
 | `sub_format` | string | `null` | Output subtitle format. |
+| `sub_font` | string | `null` | Font for subtitles converted to ASS; implies `sub_format` ASS. With another `sub_format` the request returns `400`. |
 | `video_only` / `audio_only` / `subs_only` / `chapters_only` | boolean | `false` | Track-type restriction (at most one). |
 | `no_subs` / `no_audio` / `no_chapters` / `no_video` / `no_attachments` | boolean | `false` | Skip a track type. |
 | `skip_subtitle_errors` | boolean | `false` | Skip a subtitle that fails to download and keep the other tracks. |
@@ -480,17 +482,18 @@ Make a download job. It requires `service` and `title_id`. Every other field is 
 | `downloads` | int | `1` | Concurrent tracks. |
 | `worst` | boolean | `false` | Lowest bitrate within quality. |
 | `best_available` | boolean | `false` | Fall back to best available. With `all_drm`, a DRM system that does not license is a warning. |
-| `generate_dv` | boolean | `false` | With `HYBRID` in `range`, make Dolby Vision from the HDR10+ metadata when a title has no DV track. Needs `hdr10plus_tool` on the server. Without `HYBRID` in `range`, the request returns `400`. |
+| `generate_dv` | boolean | `false` | With `HYBRID` in `range`, make Dolby Vision from the HDR10+ metadata or the decoded video when a title has no DV track. With `HDR10` or `HDR10P` in `range` and no `HYBRID`, make it for that base and ignore a DV track. With none of the three in `range`, the field has no effect. |
 | `repack` | boolean | `false` | Add REPACK tag. |
 | `tag` | string | `null` | Release group tag. |
 | `tmdb_id` / `imdb_id` / `tvdb_id` / `anilist_id` | - | `null` | External ID overrides. Each resolves its metadata directly instead of by a title search, and is used for tagging. Set `enrich` to also take the title, year and original language. Give at most one of `tmdb_id`, `imdb_id` and `tvdb_id`, since unshackle resolves the others from it. Sending two returns `400`. `anilist_id` still combines with one of them. `tmdb_id` and `tvdb_id` must be positive integers, `imdb_id` must look like `tt1375666`, and `anilist_id` must be a positive integer or a string like `mal:12345`, or the request returns `400`. An ID whose provider is unconfigured, such as `tmdb_id` with no `tmdb_api_key`, fails the job rather than returning `400`. `anilist_id` needs no API key. |
 | `tvdb_order` | `official`, `dvd`, `absolute`, `alternate`, `regional` | `null` | Renumber episodes to a TVDB season order. Falls back to the `tvdb_order` config option. |
+| `continuous_episodes` | boolean | `false` | Number each season on from the season before it, so season two starts at episode 5 after four episodes. Season 0 and episode 0 keep their numbers. `wanted` selects by the new numbers, but the list endpoints show the numbers of the service. |
 | `enrich` | boolean | `false` | Overwrite title, year and original language with the external source's. Needs one of `tmdb_id`, `imdb_id`, `tvdb_id` or `anilist_id`. Without one the job fails instead of returning `400`. |
 | `daily` | boolean | `false` | Treat the title as daily/date-based content and fill missing episode air dates from TVDB. The fill needs `enrich` and a TVDB ID. An air date the service already set is kept. |
 | `output_dir` | string | `null` | Output directory, relative to the server's downloads directory. The server rejects a path that resolves outside it with `400`. |
 | `no_cache` / `reset_cache` | boolean | `false` | Title cache controls. |
 
-**Validation.** Invalid values return `400 INVALID_PARAMETERS`. `vcodec`, `acodec` and `sub_format` take the same spellings as the CLI options of the same name (`unshackle dl --help` prints each list). The API and the CLI read one list, so they cannot disagree. `range` must be one of SDR/HDR10/HDR10P/DV/HLG/HYBRID, and `HDR10+` is also valid. The bitrate, download worker, and download counts must be positive integers. You may set at most one of the `*_only` flags. You cannot combine `no_subs` with `subs_only`, or `no_audio` with `audio_only`. The language fields (`lang`, `v_lang`, `a_lang`, `s_lang`, `forced_s_lang` and the `require_*` fields) must be arrays of strings: a single string such as `"en"` returns `400`. The server checks every other field with the type of its `dl` option. A `null` or an empty string gets the default from the table.
+**Validation.** Invalid values return `400 INVALID_PARAMETERS`. `vcodec`, `acodec` and `sub_format` take the same spellings as the CLI options of the same name (`unshackle dl --help` prints each list). The API and the CLI read one list, so they cannot disagree. `range` must be one of SDR/HDR10/HDR10P/VIVID/DV/HLG/HYBRID, and `HDR10+` and `HDR Vivid` are also valid. The bitrate, download worker, and download counts must be positive integers. You may set at most one of the `*_only` flags. You cannot combine `no_subs` with `subs_only`, or `no_audio` with `audio_only`. The language fields (`lang`, `v_lang`, `a_lang`, `s_lang`, `forced_s_lang` and the `require_*` fields) must be arrays of strings: a single string such as `"en"` returns `400`. The server checks every other field with the type of its `dl` option. A `null` or an empty string gets the default from the table.
 
 **Service options.** A service's own CLI options travel in the same body. Send them in a nested
 `service_params` object, or as flat top-level keys. When the body has `service_params`, the server
@@ -583,6 +586,7 @@ Show download jobs, with optional filtering and sorting.
           "segments_total": 300,
           "speed": "5.2 MB/s",
           "skipped_subtitles": [],
+          "skipped_titles": [],
           "input_prompt": null,
           "notice": null
         }
@@ -851,6 +855,7 @@ Read the persisted history of jobs that reached a terminal state, newest first. 
           "created_time": "2026-07-03T12:00:00+00:00",
           "completed_time": "2026-07-03T12:08:00+00:00",
           "output_files": ["/downloads/Example.S01E01.mkv"],
+          "skipped_titles": [],
           "error_message": null,
           "parameters": { "...": "redacted" }
         }

@@ -223,9 +223,10 @@ the remote client's `-q` when the remote session starts:
   error. The server checks the values the job runs with, after it applies the service defaults
   and the `serve:` download defaults.
 
-The limit protects the server's device, not the content keys. For a Widevine track, a server vault
-still supplies a content key at every height. A PlayReady track never reads the vault, so above
-the limit it always goes to the client's device. A licence for a lower track can carry the
+The limit protects the server's device, not the content keys. A server vault still supplies a
+content key at every height: for a Widevine track, the key of the track's own KID or of every KID in
+its header; for a PlayReady track, only the key of the track's own KID. A PlayReady track whose
+own KID the server does not know always goes to the client's device above the limit. A licence for a lower track can carry the
 content key of a higher track when the service shares one content key between them. With server
 accounts enabled, a client that reports a stronger device than it holds makes the server's
 account request those manifests; the licence server still refuses its challenge.
@@ -233,17 +234,25 @@ account request those manifests; the licence server still refuses its challenge.
 `server_vault` lets a remote session that the client's own device licenses take content keys
 from the server vault. Set it to `true` for every service, or to a list of service tags. It is
 `false` unless the entry sets it, and `server_cdm` for a service implies it. The server looks up
-every KID of the track in its vault and makes no live licence. A track that the vault does not
+the track's own KID in its vault, or every KID of the track when it does not know that KID, and
+makes no live licence. A track that the vault does not
 hold goes back to the client's device. When the service runs the remote session on the server's
 own device (a service option, such as a server-identity flag), the client's own vaults, and the
 server vault with this grant, are the only source, and a missing content key stops the download.
 
 `admin` is a boolean that lets the API key run the maintenance endpoints (clear-cache, clear-temp, refresh-services). It is `false` unless the entry sets it. Keys that have no `users` entry, such as `api_secret`, keep that access.
 
+`shared` is a boolean for an API key that a gateway in front of the server gives to many people.
+The gateway puts its own ID for each person in the `X-Client-Id` header, and the server then
+counts the `--local-proxy` tunnels of that API key for each person. Without `shared: true` the
+server ignores the header, because a client that connects to the server directly can set any
+value. Set it only when the gateway always replaces the header that the client sends.
+
 A `tier` names an entry under `serve.tiers`, which holds the settings that several API keys
 share. Today a tier carries `rate_limit`, the requests per hour that API key may make; an API
 key can also set its own `rate_limit`, which wins over its tier's. An API key with neither has
-no limit. Going over the limit answers `429` with a `Retry-After` header. The server keeps a
+no limit. Going over the limit answers `429` with a `Retry-After` header, and a `--remote`
+client waits that time before it tries again. The server keeps a
 fixed window rather than a sliding one: it opens on the first request and resets an hour
 later. A `tier` that names no entry under `serve.tiers`, or a `rate_limit` that is not a
 positive whole number, stops the server at startup, because the alternative is an API key that
@@ -341,6 +350,8 @@ serve:
     f3a4b5c6:
       services: [EXAMPLE1]
       server_vault: [EXAMPLE1]    # the client's device licenses; the server vault still serves keys
+    d7e8f9a0:
+      shared: true                # a gateway gives this key to many people; tunnels count per X-Client-Id
 ```
 
 !!! note "`dl` keys inside `serve`"

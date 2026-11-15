@@ -30,6 +30,7 @@ DYNAMIC_RANGE_MAP = {
     "Dolby Vision": "DV",
     "HDR10 / HDR10+": "HDR10P",
     "HDR10 / HDR10": "HDR",
+    "HDR Vivid": "HDRVivid",
 }
 AUDIO_CODEC_MAP = {
     "E-AC-3": "DDP",
@@ -38,6 +39,7 @@ AUDIO_CODEC_MAP = {
     "DTS-UHD": "DTS-X",
     "DTS LBR": "DTS-LBR",
     "MPEG-H 3D Audio": "MPEG-H",
+    "MPEG Audio Layer 3": "MP3",
 }
 
 SPACED_AUDIO_CODECS = {"DTS-X"}

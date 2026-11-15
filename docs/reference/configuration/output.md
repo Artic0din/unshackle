@@ -40,7 +40,7 @@ folder-kind keys.
     `absolute`, `date`, `quality`, `resolution`, `source`, `tag`, `track_number`, `artist`,
     `album_artist`, `album`, `disc`, `track_total`, `disc_total`, `release_type`, `genre`,
     `explicit`, `isrc`, `upc`, `label`, `audio`, `audio_channels`, `audio_full`, `atmos`,
-    `dual`, `multi`, `dubbed`, `video`, `hdr`, `hfr`, `edition`, `repack`, `lang_tag`,
+    `dual`, `multi`, `dubbed`, `video`, `hdr`, `hfr`, `3d`, `edition`, `repack`, `lang_tag`,
     `title_type`.
 
 !!! warning "`{part?}` is already inside `{season_episode}`"
@@ -59,7 +59,9 @@ folder-kind keys.
     or `{episode}`. Any series with a TVDB absolute order can use it, anime most often.
     Services can supply it, and
     [`--enrich`](../../guide/downloading.md#metadata-and-tagging) fills it in from TVDB.
-    Use `{absolute?}` so the name stays clean when it is unknown.
+    Use `{absolute?}` so the name stays clean when it is unknown. To keep the season and
+    continue the episode number instead (`S02E05`), use
+    [`--continuous-episodes`](../../guide/downloading.md#continuous-episode-numbers).
 
 !!! tip "`sports` names an event by year or date"
     A service marks an event episode as sport, and that episode then uses the `sports`
@@ -127,7 +129,7 @@ Rule semantics:
 - A value can be a scalar or a list. A list matches if **any** entry matches.
 - Comparison is case-insensitive string equality.
 - The keys of `when` are the filename template variables for the release itself:
-  `title_type`, `quality`, `resolution`, `source`, `video`, `hdr`, `hfr`, `audio`,
+  `title_type`, `quality`, `resolution`, `source`, `video`, `hdr`, `hfr`, `3d`, `audio`,
   `audio_channels`, `audio_full`, `atmos`, `dual`, `multi`, `dubbed`, `edition`, `repack`,
   and `lang_tag`. Only these are available. unshackle adds the title's own fields (`title`,
   `year`, `season`, `episode`, and so on) after it evaluates the rules, so a condition cannot
@@ -142,8 +144,8 @@ Put the more specific rules first, because unshackle stops at the first match.
     an HDR10 base layer gives `DV.HDR`, and with an HDR10+ base layer `DV.HDR10P`. Plain `DV`
     does **not** match those. Name every variant you want, as the example above does. Note
     also that HDR10 gives `HDR`, not `HDR10`, and so does a PQ video track with no HDR10
-    metadata. The full set of values is `HDR`, `HDR10P`, `DV`, `DV.HDR`, `DV.HDR10P`, and
-    `HLG`, as listed in the
+    metadata. The full set of values is `HDR`, `HDR10P`, `DV`, `DV.HDR`, `DV.HDR10P`,
+    `HDRVivid`, and `HLG`, as listed in the
     [variable table](../../guide/output-and-naming.md#template-variables).
 
 ### Operators

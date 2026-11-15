@@ -156,13 +156,13 @@ class TrackRequest:
     codecs: list[Video.Codec] = []            # empty == accept any codec
     ranges: list[Video.Range] = [Video.Range.SDR]
     best_available: bool = False
-    generate_dv: bool = False                 # --generate-dv: make Dolby Vision from HDR10+
+    generate_dv: bool = False                 # --generate-dv: make Dolby Vision when a title has no DV track
 ```
 
 !!! note "`generate_dv` and a hand-made HYBRID"
     A service that fetches the HYBRID variants itself (HDR10 and DV) must also fetch
     HDR10P when `track_request.generate_dv` is set and the title has no DV track.
-    The conversion needs an HEVC HDR10+ track as its base.
+    unshackle prefers an HEVC HDR10+ track as the base, and measures an HDR10 base from the decoded video.
     `get_tracks_for_variants` does this for you.
 
 !!! note "Read the request, don't second-guess the user"
@@ -370,9 +370,9 @@ Common constructor fields:
 
     From `get_tracks()`, give one `Audio` track for each codec and bitrate you offer
     for the song. The framework then selects one with its usual audio options.
-    A `Song` skips the muxer, so restore the real container suffix on the track path
-    in `on_track_downloaded`. The **MUSIC_EXAMPLE** service shows the full music
-    surface.
+    A `Song` skips the muxer: the framework reads the codec from the downloaded file
+    and gives the file its container, so a service does not rename the track path.
+    The **MUSIC_EXAMPLE** service shows the full music surface.
 
 !!! note "The ID must be unique and stable"
     `id_` must be truthy and, if it has a length, at least 4 characters, to

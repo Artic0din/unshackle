@@ -27,6 +27,7 @@ from aiohttp import web
 from unshackle.core.api.compression import safe_inflate
 from unshackle.core.api.errors import APIError, APIErrorCode, categorize_exception, handle_api_exception
 from unshackle.core.api.input_bridge import AuthStatus, InputBridge, NoUserBridge
+from unshackle.core.api.progress import track_log_label
 from unshackle.core.api.sanitize import MAX_SESSION_CACHE_KEYS, safe_cache_key, safe_cache_payload, sanitize_log
 from unshackle.core.api.session_log import SessionLogBuffer, SessionLogMirror, capture_service_logs
 from unshackle.core.api.session_store import SessionStore
@@ -42,7 +43,7 @@ from unshackle.core.proxies.resolve import initialize_proxy_providers, is_loopba
 from unshackle.core.services import Services
 from unshackle.core.session import RnetSession, utf8_text
 from unshackle.core.titles import Episode, Movie, Song, Title_T
-from unshackle.core.titles.music import SONG_FIELDS
+from unshackle.core.titles.music import MUSIC_DATA_KEYS, SONG_FIELDS, song_metadata
 from unshackle.core.titles.title import rename
 from unshackle.core.tracks import Audio, Subtitle, Tracks, Video
 from unshackle.core.tunnel import (
@@ -87,11 +88,13 @@ DEFAULT_DOWNLOAD_PARAMS = {
     "require_audio": [],
     "require_video": [],
     "require_subs": [],
+    "skip_missing": False,
     "forced_subs": False,
     "forced_subs_only": False,
     "forced_s_lang": [],
     "exact_lang": False,
     "sub_format": None,
+    "sub_font": None,
     "video_only": False,
     "audio_only": False,
     "subs_only": False,
@@ -133,6 +136,7 @@ DEFAULT_DOWNLOAD_PARAMS = {
     "imdb_id": None,
     "tvdb_id": None,
     "tvdb_order": None,
+    "continuous_episodes": False,
     "anilist_id": None,
     "enrich": False,
     "daily": False,
@@ -1359,6 +1363,7 @@ CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, X-Secret-Key, Authorization",
     "Access-Control-Max-Age": "3600",
+    "Access-Control-Expose-Headers": "Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset",
 }
 
 
@@ -1413,8 +1418,17 @@ def rate_limit_response(secret_key: str) -> Optional[web.Response]:
     return web.json_response(
         {"status": 429, "message": "Rate limit exceeded."},
         status=429,
-        headers={"Retry-After": str(retry_after)},
+        headers={"Retry-After": str(retry_after), **stats.rate_limit_headers(secret_key)},
     )
+
+
+def add_rate_limit_headers(response: web.StreamResponse, secret_key: str) -> web.StreamResponse:
+    """Put *secret_key*'s rate-limit headers on *response*; a streamed response has sent its headers already."""
+    from unshackle.core.api.stats import stats
+
+    if not response.prepared:
+        response.headers.update(stats.rate_limit_headers(secret_key))
+    return response
 
 
 @web.middleware
@@ -1438,7 +1452,7 @@ async def api_key_authentication(request: web.Request, handler: Any) -> web.Stre
         return web.json_response({"status": 401, "message": "Secret Key is Invalid."}, status=401)
     if request.path == "/api/health":
         return await handler(request)
-    return rate_limit_response(secret_key) or await handler(request)
+    return rate_limit_response(secret_key) or add_rate_limit_headers(await handler(request), secret_key)
 
 
 def caller_key(request: Optional[web.Request] = None) -> str:
@@ -1568,6 +1582,8 @@ def serialize_title(title: Title_T) -> Dict[str, Any]:
     if is_song:
         for field in SONG_FIELDS:
             result[field] = getattr(title, field, None)
+        metadata = song_metadata(title)
+        result["music_data"] = {key: metadata[key] for key in MUSIC_DATA_KEYS if metadata.get(key) not in (None, "")}
     if isinstance(title, (Episode, Movie)) and getattr(title, "anime", None) is not None:
         result["anime"] = title.anime
 
@@ -1737,6 +1753,7 @@ def serialize_video_track(track: Video, include_url: bool = False) -> Dict[str, 
         "dv_compatible_bitstream": bool(getattr(track, "dv_compatible_bitstream", False)),
         "hdr10plus": bool(getattr(track, "hdr10plus", False)),
         "hdr10_base": bool(getattr(track, "hdr10_base", False)),
+        "stereo": bool(getattr(track, "stereo", False)),
     }
     result.update(serialize_track_common(track))
     if include_url and hasattr(track, "url") and track.url:
@@ -2247,21 +2264,18 @@ def validate_download_parameters(data: Dict[str, Any]) -> Optional[str]:
         if value is not None and (not isinstance(value, list) or not all(isinstance(v, str) for v in value)):
             return f"{key} must be an array of language strings"
 
-    ranges = data.get("range") or []
-    ranges = ranges if isinstance(ranges, list) else [ranges]
-    if data.get("generate_dv"):
-        # a request without a range runs with the serve: default range
-        job_ranges = ranges or (config.serve or {}).get("range") or []
-        job_ranges = job_ranges if isinstance(job_ranges, list) else [job_ranges]
-        if not any(str(r).upper() == "HYBRID" for r in job_ranges):
-            return "generate_dv needs HYBRID in range."
-
-    from unshackle.commands.dl import dl
+    from unshackle.commands.dl import dl, subtitle_look
 
     try:
-        cast_dl_params(dl.cli, data)
+        params = cast_dl_params(dl.cli, data)
     except click.BadParameter as e:
         return e.message
+
+    if params.get("sub_font"):
+        try:
+            subtitle_look(params.get("sub_format"), params["sub_font"], None)
+        except ValueError as e:
+            return f"Invalid sub_font: {e}"
 
     return None
 
@@ -4639,16 +4653,22 @@ def extract_pssh_from_track(track: Any, drm_type: str) -> Optional[str]:
 
 
 def fetch_init_segment(track: Any, session: Any = None) -> Optional[bytes]:
-    """The init segment of a DASH track; None for a track that is not DASH, or when the fetch fails."""
+    """The init segment of a DASH track, or the head of a one-file track with DRM; None otherwise, or when the fetch fails."""
     from unshackle.core.manifests import DASH as DASHManifest
-
-    dash = (getattr(track, "data", None) or {}).get("dash") or {}
-    if not all(dash.get(k) is not None for k in ("period", "adaptation_set", "representation", "manifest")):
-        return None
 
     session = getattr(track, "session", None) or session
     if session is None:
         return None
+
+    dash = (getattr(track, "data", None) or {}).get("dash") or {}
+    if not all(dash.get(k) is not None for k in ("period", "adaptation_set", "representation", "manifest")):
+        if getattr(track, "descriptor", None) is not Video.Descriptor.URL or not getattr(track, "drm", None):
+            return None
+        try:
+            return track.get_init_segment(session=session)
+        except Exception as e:
+            log.debug(f"Init segment fetch failed for {track.id}: {e!r}")
+            return None
 
     try:
         return DASHManifest.get_period_segments(
@@ -4809,7 +4829,7 @@ def server_drm_candidates(
             candidates.insert(0, preferred)
         else:
             warn(
-                f"Track {sanitize_log(str(track.id)[:12])} wants {preferred} DRM "
+                f"Track {track_log_label(track)} wants {preferred} DRM "
                 "but the server has no device for it, using the configured DRM instead"
             )
     return candidates
@@ -4827,7 +4847,7 @@ def pick_server_pssh(track: Any, candidates: List[str]) -> Optional[tuple[str, s
             pssh_str = extract_pssh_from_track(track, "playready")
             if pssh_str:
                 log.info(
-                    f"Track {sanitize_log(str(track.id)[:12])} has only a PlayReady PSSH, licensing it with the Widevine device"
+                    f"Track {track_log_label(track)} has only a PlayReady PSSH, licensing it with the Widevine device"
                 )
         if pssh_str:
             return candidate, pssh_str
@@ -4860,28 +4880,29 @@ def once(shared: Dict[Any, Any], key: Any, make: Callable[[], Any]) -> Any:
 
 
 def check_vaults(
-    kids: list, service_name: str, shared: Optional[Dict[str, Any]] = None
+    kids: list, service_name: str, shared: Optional[Dict[str, Any]] = None, track_kid: Optional[uuid.UUID] = None
 ) -> Optional[tuple[Dict[str, str], Dict[str, str]]]:
-    """Examine the server vaults for existing content keys that match all KIDs.
+    """Examine the server vaults for existing content keys that match the KIDs.
 
-    Returns `(KID:KEY, KID:vault name)` if ALL KIDs are found, None otherwise. The vault
-    name travels to the client, which is the only side that can prove the content key decrypts.
+    Returns `(KID:KEY, KID:vault name)` when every KID is found, or with ``track_kid`` when that
+    KID is found, with the other KIDs the vaults hold; None otherwise. The vault name travels to
+    the client, which is the only side that can prove the content key decrypts.
     """
-    from uuid import UUID
-
     try:
         vaults = once({} if shared is None else shared, "vaults", lambda: load_server_vaults(service_name))
         if not vaults.vaults:
             return None
         keys: Dict[str, str] = {}
         sources: Dict[str, str] = {}
-        for kid in kids:
-            kid_uuid = kid if isinstance(kid, UUID) else UUID(hex=str(kid))
+        wanted = [kid if isinstance(kid, uuid.UUID) else uuid.UUID(hex=str(kid)) for kid in kids]
+        if track_kid:
+            wanted = [track_kid, *(kid for kid in wanted if kid != track_kid)]
+        for kid_uuid in wanted:
             content_key, vault_used = vaults.get_key(kid_uuid)
             if content_key:
                 keys[kid_uuid.hex] = content_key
                 sources[kid_uuid.hex] = vault_used.name if vault_used else "unknown"
-            else:
+            elif track_kid in (None, kid_uuid):
                 return None
         if keys:
             log.info(f"Vault hit: {len(keys)} key(s) from server vaults, skipping CDM")
@@ -4956,6 +4977,17 @@ def license_with_track_fallback(drm: Any, track: Any, **kwargs: Any) -> Dict[str
     return {kid: key for kid, key in keys.items() if not is_null_key(key)}
 
 
+def client_track_kid(kid_hex: Any, track: Any) -> Optional[uuid.UUID]:
+    """The KID a client asks the server CDM for, when the track's DRM names it; None for any other value."""
+    if not isinstance(kid_hex, str):
+        return None
+    try:
+        kid = uuid.UUID(hex=kid_hex)
+    except ValueError:
+        return None
+    return kid if any(kid in (getattr(d, "kids", None) or []) for d in getattr(track, "drm", None) or []) else None
+
+
 def pssh_kids(pssh_b64: str, drm_type: str) -> set:
     """The KIDs a base64 PSSH names, for either DRM system."""
     if drm_type == "playready":
@@ -5004,13 +5036,15 @@ def handle_single_server_cdm(
     refusal: Optional[APIError] = None,
     vault_only: bool = False,
     shared: Optional[Dict[str, Any]] = None,
+    track_kid: Optional[uuid.UUID] = None,
 ) -> Dict[str, str]:
     """Do the single-track server_cdm licensing with the DRM class get_content_keys() flow.
 
     ``sources`` is filled with the vault name for every returned content key a server vault
-    supplied. A content key the CDM licensed gets no entry. It raises ``refusal`` before a live licence:
-    after a Widevine vault miss, or at once for PlayReady, whose licence can carry keys its header does not name.
-    With ``vault_only`` no server device is involved: the header's KIDs come from the vault, else ``refusal``.
+    supplied. A content key the CDM licensed gets no entry. A vault answers in place of the licence
+    when it holds ``track_kid``, the KID the track is encrypted with, or else every KID of the header.
+    PlayReady without ``track_kid`` always licenses, as its licence can carry keys its header does not name.
+    It raises ``refusal`` before a live licence. With ``vault_only`` no server device is involved.
     ``shared`` keeps the vaults and CDMs one ``license_response`` call built, for its next track.
     """
     import base64
@@ -5027,12 +5061,16 @@ def handle_single_server_cdm(
     if not pssh_b64:
         raise APIError(APIErrorCode.INVALID_INPUT, "No PSSH available for server_cdm licensing")
 
+    def from_vaults(kids: Iterable[uuid.UUID]) -> Optional[Dict[str, str]]:
+        """The vault keys for ``kids`` (see ``check_vaults``), with their sources noted."""
+        hit = check_vaults(list(kids), service_name, shared=shared, track_kid=track_kid)
+        if hit and sources is not None:
+            sources.update(hit[1])
+        return hit[0] if hit else None
+
     if vault_only:
-        vault_hit = check_vaults(list(pssh_kids(pssh_b64, drm_type)), service_name, shared=shared)
-        if vault_hit:
-            if sources is not None:
-                sources.update(vault_hit[1])
-            return vault_hit[0]
+        if vault_keys := from_vaults(pssh_kids(pssh_b64, drm_type)):
+            return vault_keys
         raise refusal or APIError(APIErrorCode.NO_CONTENT, "The server vault holds no content key for this track")
 
     api_key = caller_key(request)
@@ -5053,6 +5091,8 @@ def handle_single_server_cdm(
         # Gate on the caller's CDM device first: no device, no keys from the vault or CDM.
         device_name = resolve_device_name(user_config, drm_type, service_name)
 
+        if track_kid and (vault_keys := from_vaults(pr_drm.kids)):
+            return vault_keys
         if refusal:
             raise refusal
 
@@ -5080,11 +5120,7 @@ def handle_single_server_cdm(
         # harvest server-side keys from the vault fallback below.
         device_name = resolve_device_name(user_config, drm_type, service_name)
 
-        vault_hit = check_vaults(wv_drm.kids, service_name, shared=shared)
-        if vault_hit:
-            vault_keys, vault_sources = vault_hit
-            if sources is not None:
-                sources.update(vault_sources)
+        if vault_keys := from_vaults(wv_drm.kids):
             return vault_keys
         if refusal:
             raise refusal
@@ -5357,23 +5393,26 @@ def license_response(
                 session.log_buffer.append(logging.WARNING, message)
 
         def license_track(
-            track: Any, title: Any, candidates: list
+            track: Any, title: Any, candidates: list, track_kid: Optional[uuid.UUID]
         ) -> tuple[Dict[str, str], Optional[str], Optional[str]]:
             """`(keys, drm_type, pssh)` for the track's current DRM, licensing once per unique PSSH.
 
-            A track the server must not license live goes into ``capped_tracks`` with no keys, and its PSSH
-            stays uncached, as a track under the cap can share it.
+            A cached vault answer that lacks ``track_kid`` is asked again for that KID. A track the server
+            must not license live goes into ``capped_tracks`` with no keys, and its PSSH stays uncached,
+            as a track under the cap can share it.
             """
             picked = pick_server_pssh(track, candidates)
             if not picked:
-                warn(f"No PSSH on track {sanitize_log(str(track.id)[:12])} for {', '.join(candidates) or 'any CDM'}")
+                warn(f"No PSSH on track {track_log_label(track)} for {', '.join(candidates) or 'any CDM'}")
                 return {}, None, None
             candidate, pssh_str = picked
 
             cache_key = (pssh_str, pssh_set(track))
-            if cache_key not in keys_by_pssh:
-                keys_by_pssh[cache_key] = {}
-                sources_by_pssh[cache_key] = {}
+            cached = keys_by_pssh.get(cache_key)
+            from_vault = bool(cached) and set(cached or {}) <= set(sources_by_pssh.get(cache_key, {}))
+            if cached is None or (track_kid and track_kid.hex not in cached and from_vault):
+                keys_by_pssh.setdefault(cache_key, {})
+                sources_by_pssh.setdefault(cache_key, {})
                 try:
                     keys = handle_single_server_cdm(
                         service,
@@ -5386,18 +5425,19 @@ def license_response(
                         live_licence_refusal(session, track),
                         vault_only=vault_only,
                         shared=shared,
+                        track_kid=track_kid,
                     )
                     if keys:
-                        keys_by_pssh[cache_key] = keys
+                        keys_by_pssh[cache_key] = {**keys_by_pssh[cache_key], **keys}
                         drm_type_by_pssh[cache_key] = candidate
                 except SystemExit:
-                    warn(f"Service exited while resolving keys for track {sanitize_log(str(track.id)[:12])}, skipping")
+                    warn(f"Service exited while resolving keys for track {track_log_label(track)}, skipping")
                 except (Exception, SystemExit) as e:
                     if isinstance(e, APIError) and e.error_code is APIErrorCode.SERVER_CDM_CAPPED:
                         del keys_by_pssh[cache_key], sources_by_pssh[cache_key]
                         capped_tracks[str(track.id)] = e.details
                         return {}, None, pssh_str
-                    warn(f"Failed to resolve keys for track {sanitize_log(str(track.id)[:12])}: {redact_all(str(e))}")
+                    warn(f"Failed to resolve keys for track {track_log_label(track)}: {redact_all(str(e))}")
             return keys_by_pssh[cache_key], drm_type_by_pssh.get(cache_key), pssh_str
 
         for tid in track_ids:
@@ -5409,7 +5449,7 @@ def license_response(
             init_data = fetch_init_segment(track, svc_session)
             ensure_track_drm(track, svc_session, init_data)
             if not track.drm or all(isinstance(d, BlowfishStripe) for d in track.drm):
-                log.info(f"Track {sanitize_log(tid[:12])} needs no licence, so it has no keys to resolve")
+                log.info(f"Track {track_log_label(track)} needs no licence, so it has no keys to resolve")
                 clear_tracks.append(tid)
                 continue
 
@@ -5421,34 +5461,34 @@ def license_response(
                 else server_drm_candidates(service_tag, user_config, drm_type, track, warn)
             )
 
-            keys, track_drm_type, pssh_str = license_track(track, title, candidates)
+            probed: Optional[uuid.UUID] = None
+            if init_data:
+                try:
+                    probed = track.get_key_id(init_data)
+                except Exception as e:
+                    log.debug(f"KID probe failed for {sanitize_log(tid[:12])}: {e!r}")
+            keys, track_drm_type, pssh_str = license_track(track, title, candidates, probed)
             # a refused track still tries its init segment PSSH, where a server vault can hold the key
             refusal = capped_tracks.pop(tid, None)
 
-            track_kid = None
-            if init_data:
-                try:
-                    track_kid = track.get_key_id(init_data)
-                except Exception as e:
-                    log.debug(f"KID probe failed for {sanitize_log(tid[:12])}: {e!r}")
-            if track_kid and track_kid.hex not in keys:
+            if probed and probed.hex not in keys:
                 manifest_drm = track.drm
                 track.drm = drm_from_init_segment(track, init_data=init_data) or manifest_drm
-                init_keys, init_drm_type, init_pssh = license_track(track, title, candidates)
+                init_keys, init_drm_type, init_pssh = license_track(track, title, candidates, probed)
                 init_refusal = capped_tracks.pop(tid, None)
                 if init_pssh != pssh_str:
                     log.info(
-                        f"The manifest PSSH gave no content key for KID {track_kid.hex} of track "
-                        f"{sanitize_log(tid[:12])}, tried the init segment PSSH"
+                        f"The manifest PSSH gave no content key for KID {probed.hex} of track "
+                        f"{track_log_label(track)}, tried the init segment PSSH"
                     )
-                if track_kid.hex in init_keys:
+                if probed.hex in init_keys:
                     keys, track_drm_type, pssh_str = init_keys, init_drm_type, init_pssh
                     refusal = None
                 else:
                     track.drm = manifest_drm
                     refusal = refusal or init_refusal
                     if not refusal:
-                        warn(f"No content key for KID {track_kid.hex} of track {sanitize_log(tid[:12])}")
+                        warn(f"No content key for KID {probed.hex} of track {track_log_label(track)}")
             if refusal:
                 capped_tracks[tid] = refusal
                 continue
@@ -5508,12 +5548,13 @@ def license_response(
             if not picked:
                 raise APIError(
                     APIErrorCode.INVALID_INPUT,
-                    f"No PSSH on track {sanitize_log(track_id[:12])} for {', '.join(candidates) or 'any CDM'}",
+                    f"No PSSH on track {track_log_label(track)} for {', '.join(candidates) or 'any CDM'}",
                 )
             server_drm_type, server_pssh = picked
+            asked_kid = client_track_kid(data.get("kid"), track)
             if pssh_b64 and server_drm_type != drm_type:
                 log.info(
-                    f"Client asked for {sanitize_log(drm_type)} on track {sanitize_log(track_id[:12])}, "
+                    f"Client asked for {sanitize_log(drm_type)} on track {track_log_label(track)}, "
                     f"licensing with the server's {server_drm_type} CDM"
                 )
                 pssh_b64 = None
@@ -5532,8 +5573,9 @@ def license_response(
                 key_sources,
                 live_licence_refusal(session, track),
                 vault_only=vault_only,
+                track_kid=asked_kid,
             )
-            log.info(f"Server CDM resolved {len(keys)} key(s) for track {sanitize_log(track_id[:12])}")
+            log.info(f"Server CDM resolved {len(keys)} key(s) for track {track_log_label(track)}")
             note_served_keys(session, keys, key_sources)
             return web.json_response({"keys": keys, "vault_keys": list(key_sources), "drm_type": server_drm_type})
 
@@ -5664,19 +5706,30 @@ async def session_delete_handler(session_id: str, request: Optional[web.Request]
     return web.json_response(response)
 
 
+def shared_key_client(request: web.Request) -> Optional[str]:
+    """The person behind a ``shared: true`` API key, from the ``X-Client-Id`` its gateway sets; None for other keys.
+
+    Only a shared key reads the header, so a client that talks to the server directly cannot use it to pass a limit.
+    """
+    if serve_user_config(request_secret_key(request) or "").get("shared") is not True:
+        return None
+    return request.headers.get("X-Client-Id", "")[:64] or None
+
+
 async def tunnel_handler(request: web.Request) -> web.StreamResponse:
     """Open a ``--local-proxy`` tunnel, or reattach to the caller's tunnel named by ``?id=``."""
     owner = request_secret_key(request)
+    client = shared_key_client(request)
     tunnel_id = request.query.get("id")
     tunnel = TUNNELS.get(tunnel_id) if tunnel_id else None
-    if tunnel_id and (not tunnel or tunnel.owner != owner):
+    if tunnel_id and (not tunnel or tunnel.owner != owner or tunnel.client != client):
         raise APIError(APIErrorCode.NOT_FOUND, "No open tunnel has this id.")
-    if not tunnel and sum(t.owner == owner for t in TUNNELS.values()) >= MAX_TUNNELS:
+    if not tunnel and sum(t.owner == owner and t.client == client for t in TUNNELS.values()) >= MAX_TUNNELS:
         raise APIError(APIErrorCode.RATE_LIMITED, f"An API key can have {MAX_TUNNELS} tunnels open at once.")
     ws = web.WebSocketResponse(heartbeat=HEARTBEAT, max_msg_size=MAX_MESSAGE)
     await ws.prepare(request)  # a request that is not a WebSocket upgrade fails here, before a tunnel exists
     if not tunnel:
-        tunnel = Tunnel(owner)
+        tunnel = Tunnel(owner, client)
         await tunnel.start()
     await tunnel.serve(ws)
     return ws
