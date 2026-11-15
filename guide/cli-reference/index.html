@@ -3097,12 +3097,12 @@
 <tr>
 <td><code>-r</code>, <code>--range</code></td>
 <td><code>SDR</code></td>
-<td>Colour range(s): <code>SDR</code>, <code>HLG</code>, <code>HDR10</code>, <code>HDR10P</code> (HDR10+), <code>DV</code>, <code>HYBRID</code>.</td>
+<td>Colour range(s): <code>SDR</code>, <code>HLG</code>, <code>HDR10</code>, <code>HDR10P</code> (HDR10+), <code>VIVID</code> (HDR Vivid), <code>DV</code>, <code>HYBRID</code>.</td>
 </tr>
 <tr>
 <td><code>--generate-dv</code></td>
 <td>off</td>
-<td>With <code>-r HYBRID</code>, make Dolby Vision from the HDR10+ metadata when a title has no Dolby Vision track. Needs <code>hdr10plus_tool</code>. See <a href="../downloading/#dolby-vision-from-hdr10">Dolby Vision from HDR10+</a>.</td>
+<td>With <code>-r HYBRID</code>, make Dolby Vision from the HDR10+ metadata or the decoded video when a title has no Dolby Vision track. With <code>-r HDR10</code> or <code>-r HDR10P</code>, make it for that base and ignore a Dolby Vision track. See <a href="../downloading/#dolby-vision-without-a-dv-track">Dolby Vision without a DV track</a>.</td>
 </tr>
 <tr>
 <td><code>-c</code>, <code>--channels</code></td>
@@ -3122,7 +3122,7 @@
 <tr>
 <td><code>--best-available</code>, <code>--warn-only</code></td>
 <td>off</td>
-<td>Warn and continue when a requested resolution, range, or language is absent, instead of failing. With <code>--all-drm</code>, also when one DRM system does not license.</td>
+<td>Warn and continue when a requested resolution, range, video language, or audio language is absent, instead of failing. With <code>--all-drm</code>, also when one DRM system does not license.</td>
 </tr>
 <tr>
 <td><code>-rvb</code>, <code>--real-video-bitrate</code></td>
@@ -3186,6 +3186,11 @@
 <td>Subtitle langs that must exist. Fails the title if one is missing. <code>--s-lang</code> still decides what to keep.</td>
 </tr>
 <tr>
+<td><code>--skip-missing</code></td>
+<td>off</td>
+<td>Skip a title that misses a required language or track, and continue with the next title. A run with one title, or a run that skips every title, still fails.</td>
+</tr>
+<tr>
 <td><code>-fs</code>, <code>--forced-subs</code></td>
 <td>off</td>
 <td>Include forced subtitle tracks.</td>
@@ -3209,6 +3214,11 @@
 <td><code>--sub-format</code></td>
 <td>-</td>
 <td>Output subtitle format (<code>SRT</code>/<code>srt</code>, <code>VTT</code>/<code>webvtt</code>, <code>ASS</code>/<code>ssa</code>, <code>TTML</code>, <code>SMI</code>, ...), or <code>original</code> to keep the source format.</td>
+</tr>
+<tr>
+<td><code>--sub-font</code></td>
+<td>-</td>
+<td>Font for subtitles converted to ASS, with the rest of the look from <code>subtitle.ass_style</code>. Implies <code>--sub-format ASS</code> and overrides a <code>sub_format</code> from the configuration file; a typed <code>--sub-format</code> of another format is an error.</td>
 </tr>
 </tbody>
 </table>
@@ -3401,6 +3411,10 @@ configuration file.</p>
 <td><code>--tvdb-order</code></td>
 <td>Renumber episodes to a TVDB season order: <code>official</code> (aired), <code>dvd</code>, <code>absolute</code>, <code>alternate</code>, or <code>regional</code>. Needs <code>tvdb_api_key</code>.</td>
 </tr>
+<tr>
+<td><code>-ce</code> / <code>--continuous-episodes</code></td>
+<td>Number each season on from the season before it. After a season one of four episodes, season two starts at <code>S02E05</code>. Season 0 and episode 0 keep their numbers.</td>
+</tr>
 </tbody>
 </table>
 <div class="admonition note">
@@ -3468,7 +3482,7 @@ and keeps the service's numbering unchanged. Pick an order that covers the whole
 </tr>
 <tr>
 <td><code>--local-proxy</code></td>
-<td>With <code>--remote</code>, send the server's service requests through your machine's own connection. Works with no other proxy option. Check it first with <code>unshackle tunnel-test</code>. See <a href="../proxies-and-vpn/#send-the-servers-requests-through-your-machine">Proxies &amp; VPN</a>.</td>
+<td>With <code>--remote</code>, send the server's service requests through your machine's own connection, or through a <code>--proxy</code> that your machine connects to. Check it first with <code>unshackle tunnel-test</code>. See <a href="../proxies-and-vpn/#send-the-servers-requests-through-your-machine">Proxies &amp; VPN</a>.</td>
 </tr>
 <tr>
 <td><code>--no-proxy</code></td>
@@ -3587,7 +3601,7 @@ and keeps the service's numbering unchanged. Pick an order that covers the whole
 </tr>
 <tr>
 <td><code>--local-proxy</code></td>
-<td>With <code>--remote</code>, send the server's search requests through your machine's own connection. Works with no other proxy option.</td>
+<td>With <code>--remote</code>, send the server's search requests through your machine's own connection, or through a <code>--proxy</code> that your machine connects to.</td>
 </tr>
 <tr>
 <td><code>--no-proxy</code></td>
@@ -3633,7 +3647,7 @@ and keeps the service's numbering unchanged. Pick an order that covers the whole
 <p>Check <code>--local-proxy</code> before a real <code>--remote</code> run. The command finds the IP address that this
 machine exits from, opens a tunnel to the server, and makes the server look up its exit IP address
 through the tunnel. It stops at the first step that fails.</p>
-<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>unshackle tunnel-test [--server NAME]
+<div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>unshackle tunnel-test [--server NAME] [--proxy VALUE]
 </span></code></pre></div>
 <table>
 <thead>
@@ -3646,6 +3660,10 @@ through the tunnel. It stops at the first step that fails.</p>
 <tr>
 <td><code>--server</code></td>
 <td>Name of the remote server from <code>remote_services</code> config, if you configure more than one.</td>
+</tr>
+<tr>
+<td><code>--proxy</code></td>
+<td>Test the route through this proxy, as <code>--local-proxy --proxy</code> uses it. Takes any <code>--proxy</code> value.</td>
 </tr>
 </tbody>
 </table>

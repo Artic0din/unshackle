@@ -2660,6 +2660,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#unshackle.core.drm.Widevine.from_playready" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        <code class="doc-symbol doc-symbol-toc doc-symbol-method"></code>&nbsp;from_playready
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#unshackle.core.drm.Widevine.from_track" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3570,6 +3581,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#unshackle.core.drm.Widevine.from_playready" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        <code class="doc-symbol doc-symbol-toc doc-symbol-method"></code>&nbsp;from_playready
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#unshackle.core.drm.Widevine.from_track" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4312,13 +4334,7 @@ challenge there directly instead.</p>
 
     <div class="doc doc-contents ">
 
-        <p>Decrypt a Track with ClearKey DRM (standard CENC).
-Args:
-    path: Path to the encrypted file to decrypt
-Raises:
-    EnvironmentError if the required decryption executable could not be found.
-    ValueError if unshackle has not yet downloaded the track.
-    SubprocessError if the decryption process returned a non-zero exit code.</p>
+        <p>Decrypt the file at <code>path</code> in place with this track's ClearKey (standard CENC) content keys.</p>
 
 
     </div>
@@ -4358,7 +4374,7 @@ Raises:
 
     <div class="doc doc-contents ">
 
-        <p>Decrypt using mp4decrypt</p>
+        <p>Decrypt with mp4decrypt.</p>
 
 
     </div>
@@ -4378,7 +4394,7 @@ Raises:
 
     <div class="doc doc-contents ">
 
-        <p>Decrypt with shaka-packager</p>
+        <p>Decrypt with shaka-packager.</p>
 
 
     </div>
@@ -5518,13 +5534,7 @@ or from an exception message that carries it, so this method covers any service.
 
     <div class="doc doc-contents ">
 
-        <p>Decrypt a Track with PlayReady DRM.
-Args:
-    path: Path to the encrypted file to decrypt
-Raises:
-    EnvironmentError if the required decryption executable could not be found.
-    ValueError if unshackle has not yet downloaded the track.
-    SubprocessError if the decryption process returned a non-zero exit code.</p>
+        <p>Decrypt the file at <code>path</code> in place with this track's PlayReady content keys.</p>
 
 
     </div>
@@ -5586,7 +5596,7 @@ track exactly. A PSSH can name the KIDs of other renditions too.</p>
 
     <div class="doc doc-contents ">
 
-        <p>Decrypt using mp4decrypt</p>
+        <p>Decrypt with mp4decrypt.</p>
 
 
     </div>
@@ -5606,7 +5616,7 @@ track exactly. A PSSH can name the KIDs of other renditions too.</p>
 
     <div class="doc doc-contents ">
 
-        <p>Decrypt with shaka-packager (original method)</p>
+        <p>Decrypt with shaka-packager.</p>
 
 
     </div>
@@ -5903,6 +5913,31 @@ track exactly. A PSSH can name the KIDs of other renditions too.</p>
 <div class="doc doc-object doc-function">
 
 
+<h3 id="unshackle.core.drm.Widevine.from_playready" class="doc doc-heading">
+<code class="doc-symbol doc-symbol-heading doc-symbol-method"></code>            <span class="doc doc-object-name doc-function-name">from_playready</span>
+
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-staticmethod"><code>staticmethod</code></small>
+  </span>
+
+<a href="#unshackle.core.drm.Widevine.from_playready" class="headerlink" title="Permanent link">&para;</a></h3>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">from_playready</span><span class="p">(</span><span class="n">pssh</span><span class="p">)</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>A Widevine PSSH naming a v1 box's own KIDs, then the KIDs the PlayReady class reads from it.</p>
+<p>pywidevine's own conversion fails on a bare WRMHEADER and byte-swaps PlayReady KIDs.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
 <h3 id="unshackle.core.drm.Widevine.from_track" class="doc doc-heading">
 <code class="doc-symbol doc-symbol-heading doc-symbol-method"></code>            <span class="doc doc-object-name doc-function-name">from_track</span>
 
@@ -6080,13 +6115,7 @@ the challenge and the session ID.</p>
 
     <div class="doc doc-contents ">
 
-        <p>Decrypt a Track with Widevine DRM.
-Args:
-    path: Path to the encrypted file to decrypt
-Raises:
-    EnvironmentError if the required decryption executable could not be found.
-    ValueError if unshackle has not yet downloaded the track.
-    SubprocessError if the decryption process returned a non-zero exit code.</p>
+        <p>Decrypt the file at <code>path</code> in place with this track's Widevine content keys.</p>
 
 
     </div>
@@ -6148,7 +6177,7 @@ track exactly. A PSSH can name the KIDs of other renditions too.</p>
 
     <div class="doc doc-contents ">
 
-        <p>Decrypt using mp4decrypt</p>
+        <p>Decrypt with mp4decrypt.</p>
 
 
     </div>
@@ -6168,7 +6197,7 @@ track exactly. A PSSH can name the KIDs of other renditions too.</p>
 
     <div class="doc doc-contents ">
 
-        <p>Decrypt with shaka-packager (original method)</p>
+        <p>Decrypt with shaka-packager.</p>
 
 
     </div>

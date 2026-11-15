@@ -2342,7 +2342,7 @@ default. In other words, config only fills in options you did not set on the com
 <td><code>range</code></td>
 <td>list</td>
 <td><code>["SDR"]</code></td>
-<td>Colour range(s): <code>SDR</code>, <code>HLG</code>, <code>HDR10</code>, <code>HDR10P</code>, <code>DV</code>, <code>HYBRID</code>.</td>
+<td>Colour range(s): <code>SDR</code>, <code>HLG</code>, <code>HDR10</code>, <code>HDR10P</code>, <code>VIVID</code>, <code>DV</code>, <code>HYBRID</code>.</td>
 </tr>
 <tr>
 <td><code>channels</code></td>
@@ -2355,6 +2355,12 @@ default. In other words, config only fills in options you did not set on the com
 <td>str</td>
 <td><em>(unset)</em></td>
 <td>Convert subtitles to this format (<code>srt</code>, <code>vtt</code>, <code>original</code>, ...).</td>
+</tr>
+<tr>
+<td><code>sub_font</code></td>
+<td>str</td>
+<td><em>(unset)</em></td>
+<td>Font for subtitles converted to ASS; implies <code>sub_format: ass</code>. Ignored when <code>sub_format</code> is another format.</td>
 </tr>
 <tr>
 <td><code>forced_subs</code></td>
@@ -2420,13 +2426,19 @@ default. In other words, config only fills in options you did not set on the com
 <td><code>best_available</code></td>
 <td>bool</td>
 <td><code>false</code></td>
-<td>Warn instead of failing when a requested resolution, range, or language is missing, or when one DRM system does not license under <code>--all-drm</code>. The CLI flag is <code>--best-available</code>, also spelled <code>--warn-only</code>.</td>
+<td>Warn instead of failing when a requested resolution, range, video language, or audio language is missing, or when one DRM system does not license under <code>--all-drm</code>. The CLI flag is <code>--best-available</code>, also spelled <code>--warn-only</code>.</td>
+</tr>
+<tr>
+<td><code>skip_missing</code></td>
+<td>bool</td>
+<td><code>false</code></td>
+<td>Skip a title that misses a required language (<code>require_audio</code>, <code>require_video</code>, <code>require_subs</code>) or a track that a filter asks for, and continue with the next title. A run with one title, or a run that skips every title, still fails. The CLI flag is <code>--skip-missing</code>. For REST API jobs, set it in the <a href="../services/#serve"><code>serve</code></a> block.</td>
 </tr>
 <tr>
 <td><code>generate_dv</code></td>
 <td>bool</td>
 <td><code>false</code></td>
-<td>With <code>-r HYBRID</code>, make Dolby Vision from the HDR10+ metadata when a title has no DV track. Needs <code>hdr10plus_tool</code>. See <a href="../../../guide/downloading/#dolby-vision-from-hdr10">Dolby Vision from HDR10+</a>.</td>
+<td>With <code>-r HYBRID</code>, make Dolby Vision from the HDR10+ metadata or the decoded video when a title has no DV track. With <code>-r HDR10</code> or <code>-r HDR10P</code>, make it for that base and ignore a DV track. See <a href="../../../guide/downloading/#dolby-vision-without-a-dv-track">Dolby Vision without a DV track</a>.</td>
 </tr>
 <tr>
 <td><code>proxy</code></td>
@@ -2626,6 +2638,12 @@ in or writes them as sidecar files. See <a href="../../../guide/subtitles/">Subt
 <td>Languages to sort to the top, in the order you give. The rest keep the default order: original language first, then alphabetical. Nothing is removed.</td>
 </tr>
 <tr>
+<td><code>ass_style</code></td>
+<td>dict</td>
+<td><em>(unset)</em></td>
+<td>Style for subtitles converted to ASS, as pysubs2 or ASS style fields (<code>fontname</code>, <code>fontsize</code>, <code>primarycolor</code> or <code>PrimaryColour</code>, ...) for a 1080-line picture. Makes ASS the output format when <code>sub_format</code> is unset. See <a href="../../../guide/subtitles/#custom-font-and-style">Custom font and style</a>.</td>
+</tr>
+<tr>
 <td><code>dedupe_codecs</code></td>
 <td>list</td>
 <td><em>(unset)</em></td>
@@ -2696,18 +2714,21 @@ it ignores entries that are not valid language tags.</p>
 that flag.</p>
 </div>
 <div class="admonition note">
-<p class="admonition-title"><code>type_priority</code> picks the default subtitle only with <code>muxing.default_language</code></p>
+<p class="admonition-title"><code>type_priority</code> alone does not pick the default subtitle</p>
 <p>At mux time the <code>default</code> flag goes to every forced subtitle whose language matches the
-first audio track, so a full dialogue track never becomes default on its own.
-<code>type_priority</code> alone does not change that. Name a subtitle language in
-<a href="#muxing"><code>muxing.default_language</code></a> and the first track in that language gets the flag
-instead, which is where <code>type_priority</code> decides which track that is:</p>
+default audio track, so a full dialogue track never becomes default on its own.
+<code>type_priority</code> changes the order of the tracks in the file. It decides the flag only
+between the tracks of one language, when you set <code>muxing.default_language.subtitle</code>. Set
+<a href="#muxing"><code>muxing.default_subtitle_type</code></a> to name the type that gets the flag:</p>
 <div class="language-yaml highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="nt">muxing</span><span class="p">:</span>
-</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">  </span><span class="nt">default_language</span><span class="p">:</span>
-</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">    </span><span class="nt">subtitle</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">en</span>
-</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="nt">subtitle</span><span class="p">:</span>
-</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">  </span><span class="nt">type_priority</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">normal</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">sdh</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">forced</span><span class="p p-Indicator">]</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">  </span><span class="nt">default_subtitle_type</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">normal</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">sdh</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">forced</span><span class="p p-Indicator">]</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">  </span><span class="nt">default_language</span><span class="p">:</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">    </span><span class="nt">subtitle</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">en</span>
 </span></code></pre></div>
+<p>Here the flag goes to the full English track, then to the English SDH track when the
+title has no full one, then to the forced one. Without <code>default_language.subtitle</code>, the
+first track of the type in file order gets the flag, in any language. A forced track is
+the exception: it gets the flag only in the language of the default audio track.</p>
 </div>
 <h2 id="audio"><code>audio</code><a class="headerlink" href="#audio" title="Permanent link">&para;</a></h2>
 <ul>
@@ -2761,6 +2782,12 @@ bitrate alone, with those same Atmos/descriptive rules still applied.</p>
 <td>Force which language is flagged <em>default</em> per track type, e.g. <code>{audio: en, subtitle: en}</code>. A tag with a region, such as <code>en-US</code>, matches only that variant.</td>
 </tr>
 <tr>
+<td><code>default_subtitle_type</code></td>
+<td>str or list</td>
+<td>unset</td>
+<td>The subtitle types that can take the <em>default</em> flag, in order: <code>forced</code>, <code>normal</code>, <code>sdh</code> (CC counts as SDH, and <code>cc</code> is the same as <code>sdh</code>). The first subtitle track of the first type that the title has gets the flag. With <code>default_language.subtitle</code>, only the tracks in that language count. unshackle ignores a different word with a warning. <code>normal</code> is the value for players that read the forced flag. Read <a href="../../../guide/output-and-naming/#muxing-options">Muxing</a>.</td>
+</tr>
+<tr>
 <td><code>merge_audio</code></td>
 <td>bool</td>
 <td><code>true</code></td>
@@ -2798,6 +2825,7 @@ bitrate alone, with those same Atmos/descriptive rules still applied.</p>
 </span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">  </span><span class="nt">default_language</span><span class="p">:</span>
 </span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">    </span><span class="nt">audio</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">en</span>
 </span><span id="__span-9-6"><a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="w">    </span><span class="nt">subtitle</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">en</span>
+</span><span id="__span-9-7"><a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="w">  </span><span class="nt">default_subtitle_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">normal</span>
 </span></code></pre></div>
 <h2 id="language_tags"><code>language_tags</code><a class="headerlink" href="#language_tags" title="Permanent link">&para;</a></h2>
 <ul>
@@ -2954,7 +2982,7 @@ Cantonese (<code>yue</code>) stays separate, so <code>cmn</code> and <code>yue</
 <p>Find the HDR10+ tracks that a service labels as HDR10. Before unshackle lists or selects tracks, it
 reads the first fragment of HEVC HDR10 tracks from DASH, HLS fMP4 and one-file sources. A track
 whose first frame carries HDR10+ (SMPTE ST 2094-40) metadata becomes <code>HDR10P</code>. Then <code>-r HDR10P</code>,
-<code>--list</code> and <a href="../../../guide/downloading/#dolby-vision-from-hdr10"><code>--generate-dv</code></a> use it.</p>
+<code>--list</code> and <a href="../../../guide/downloading/#dolby-vision-without-a-dv-track"><code>--generate-dv</code></a> use it.</p>
 <p>unshackle also probes HEVC Dolby Vision tracks. A DV track that carries HDR10+ keeps its <code>DV</code>
 range, so <code>-r DV</code> selects it, and <code>--list</code> shows it as <code>DV+HDR10P</code>. <code>-r HYBRID</code> uses it as the
 <a href="../../../guide/downloading/#colour-range">hybrid</a> of its resolution, with no base track. The
@@ -2984,6 +3012,12 @@ probes the two highest and the two lowest bitrates first:</p>
 </tr>
 </tbody>
 </table>
+<p>The probe also finds HDR Vivid in HEVC HDR10 and HLG tracks. A track becomes <code>VIVID</code>, so
+<code>-r VIVID</code> selects it, when its first frame carries CUVA HDR Vivid metadata, or when its MPEG-TS
+program map table (PMT) has the <code>cuvv</code> registration. An HLG track never becomes <code>HDR10P</code>. An audio
+track with no codec gets its codec from the PMT of an MPEG-TS first segment: the <code>AVSA</code>
+registration or <code>stream_type</code> <code>0xD5</code> gives <code>Audio Vivid</code>. The probe has no HDR10+ result for an
+MPEG-TS track.</p>
 <p>A probe that fails, or a fragment whose metadata is encrypted, keeps the label from the service.
 unshackle does not probe ISM tracks. Each probe makes one to three small requests: the 64 KiB
 fragment, plus the playlist of an HLS track or the header of a one-file track. The probes run in
@@ -2996,7 +3030,7 @@ remote downloads and to the REST API.</p>
 <ul>
 <li><strong>Type:</strong> <code>str</code> &nbsp;·&nbsp; <strong>Default:</strong> <code>v29</code></li>
 </ul>
-<p>How <a href="../../../guide/downloading/#dolby-vision-from-hdr10"><code>--generate-dv</code></a> sets the Level 1 brightness
+<p>How <a href="../../../guide/downloading/#dolby-vision-without-a-dv-track"><code>--generate-dv</code></a> sets the Level 1 brightness
 values of the Dolby Vision it makes from HDR10+. All modes make one shot per HDR10+ scene and keep the
 same peak and letterbox area. They differ in the scene average, which the TV uses to tone-map.</p>
 <table>
@@ -3023,6 +3057,8 @@ same peak and letterbox area. They differ in the scene average, which the TV use
 </table>
 <div class="language-yaml highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="nt">generate_dv_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">v29</span>
 </span></code></pre></div>
+<p>Dolby Vision that unshackle measures from the decoded video uses its measured average in all modes.
+<code>v40</code> raises the lowest average to about 10 nits, and <code>legacy</code> is the same as <code>v29</code>.</p>
 <p>The setting applies on the machine that runs the hybrid step: the client for a remote download, the
 server for a REST API job.</p>
 

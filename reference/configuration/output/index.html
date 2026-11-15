@@ -2173,7 +2173,7 @@ folder-kind keys.</p>
 <code>absolute</code>, <code>date</code>, <code>quality</code>, <code>resolution</code>, <code>source</code>, <code>tag</code>, <code>track_number</code>, <code>artist</code>,
 <code>album_artist</code>, <code>album</code>, <code>disc</code>, <code>track_total</code>, <code>disc_total</code>, <code>release_type</code>, <code>genre</code>,
 <code>explicit</code>, <code>isrc</code>, <code>upc</code>, <code>label</code>, <code>audio</code>, <code>audio_channels</code>, <code>audio_full</code>, <code>atmos</code>,
-<code>dual</code>, <code>multi</code>, <code>dubbed</code>, <code>video</code>, <code>hdr</code>, <code>hfr</code>, <code>edition</code>, <code>repack</code>, <code>lang_tag</code>,
+<code>dual</code>, <code>multi</code>, <code>dubbed</code>, <code>video</code>, <code>hdr</code>, <code>hfr</code>, <code>3d</code>, <code>edition</code>, <code>repack</code>, <code>lang_tag</code>,
 <code>title_type</code>.</p>
 </details>
 <div class="admonition warning">
@@ -2194,7 +2194,9 @@ empty on titles that have none. You add it to the name yourself, and it never re
 or <code>{episode}</code>. Any series with a TVDB absolute order can use it, anime most often.
 Services can supply it, and
 <a href="../../../guide/downloading/#metadata-and-tagging"><code>--enrich</code></a> fills it in from TVDB.
-Use <code>{absolute?}</code> so the name stays clean when it is unknown.</p>
+Use <code>{absolute?}</code> so the name stays clean when it is unknown. To keep the season and
+continue the episode number instead (<code>S02E05</code>), use
+<a href="../../../guide/downloading/#continuous-episode-numbers"><code>--continuous-episodes</code></a>.</p>
 </div>
 <div class="admonition tip">
 <p class="admonition-title"><code>sports</code> names an event by year or date</p>
@@ -2289,7 +2291,7 @@ order and the first match wins. If no rule matches, the global <code>tag</code> 
 <li>A value can be a scalar or a list. A list matches if <strong>any</strong> entry matches.</li>
 <li>Comparison is case-insensitive string equality.</li>
 <li>The keys of <code>when</code> are the filename template variables for the release itself:
-  <code>title_type</code>, <code>quality</code>, <code>resolution</code>, <code>source</code>, <code>video</code>, <code>hdr</code>, <code>hfr</code>, <code>audio</code>,
+  <code>title_type</code>, <code>quality</code>, <code>resolution</code>, <code>source</code>, <code>video</code>, <code>hdr</code>, <code>hfr</code>, <code>3d</code>, <code>audio</code>,
   <code>audio_channels</code>, <code>audio_full</code>, <code>atmos</code>, <code>dual</code>, <code>multi</code>, <code>dubbed</code>, <code>edition</code>, <code>repack</code>,
   and <code>lang_tag</code>. Only these are available. unshackle adds the title's own fields (<code>title</code>,
   <code>year</code>, <code>season</code>, <code>episode</code>, and so on) after it evaluates the rules, so a condition cannot
@@ -2304,8 +2306,8 @@ order and the first match wins. If no rule matches, the global <code>tag</code> 
 an HDR10 base layer gives <code>DV.HDR</code>, and with an HDR10+ base layer <code>DV.HDR10P</code>. Plain <code>DV</code>
 does <strong>not</strong> match those. Name every variant you want, as the example above does. Note
 also that HDR10 gives <code>HDR</code>, not <code>HDR10</code>, and so does a PQ video track with no HDR10
-metadata. The full set of values is <code>HDR</code>, <code>HDR10P</code>, <code>DV</code>, <code>DV.HDR</code>, <code>DV.HDR10P</code>, and
-<code>HLG</code>, as listed in the
+metadata. The full set of values is <code>HDR</code>, <code>HDR10P</code>, <code>DV</code>, <code>DV.HDR</code>, <code>DV.HDR10P</code>,
+<code>HDRVivid</code>, and <code>HLG</code>, as listed in the
 <a href="../../../guide/output-and-naming/#template-variables">variable table</a>.</p>
 </div>
 <h3 id="operators">Operators<a class="headerlink" href="#operators" title="Permanent link">&para;</a></h3>
