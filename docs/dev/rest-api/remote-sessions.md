@@ -540,6 +540,11 @@ layer.
   prompt endpoint returns it with the `authenticated` status, and the client shows it while its own
   requests run, the same way it shows one during login. It clears when the service's wait ends. The
   wait ends when the service's own check succeeds or times out, not on a client answer.
+  The client finds the approval by polling the prompt endpoint while its own requests run, and every
+  poll counts against its API rate limit (`serve.tiers`). A client with a local CDM already polls
+  every 0.5 seconds to relay CDM calls, so the approval adds no request. A client without one polls
+  every 15 seconds, so it costs at most 240 requests an hour, and a request that ends within 15
+  seconds costs none. The notice can appear up to 15 seconds after the wait begins.
 - `AUTH_INPUT_TIMEOUT = 600.0` seconds. This is also the TTL granted to
   `AUTHENTICATING` / `PENDING_INPUT` sessions in the store.
 

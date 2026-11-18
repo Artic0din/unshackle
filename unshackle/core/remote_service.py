@@ -82,6 +82,11 @@ RETRY_AFTER_LOCK = Lock()
 RATE_LIMIT_TRIES = 3
 TUNNEL_SLOT_POLL = 15
 REOPEN_WAIT = 1800.0  # seconds a lost session waits for its server to come back; covers a deploy's whole drain
+# Seconds between prompt GETs while a request runs. Each GET counts against the client's API rate limit.
+# A client that relays CDM calls polls fast, because the server drops a call that no GET fetches within 10 seconds.
+# One without a local CDM polls only to show a device approval, which stays up for minutes.
+CDM_POLL_INTERVAL = 0.5
+APPROVAL_POLL_INTERVAL = 15.0
 
 
 class _Mute(local):
@@ -1149,6 +1154,7 @@ class RemoteService:
         self._cdm_lock = Lock()
         self._cdm_requests = 0
         self._cdm_stop = Event()
+        self._cdm_relay = False
         self.apply_service_config(svc_config)
 
     def apply_service_config(self, svc_config: dict) -> None:
@@ -1420,6 +1426,7 @@ class RemoteService:
         if status == "authenticating":
             self.poll_auth_completion()
         # also without a local CDM: the poller shows post-login device approvals, not only relays CDM calls
+        self._cdm_relay = bool(create_data.get("cdm_relay"))
         self.client.in_flight = self.answering_cdm_calls
         self.drain_server_logs()
         self.start_keepalive()
@@ -1819,7 +1826,7 @@ class RemoteService:
                 self._cdm_stop = Event()
                 Thread(
                     target=self.poll_cdm_calls,
-                    args=(self._cdm_stop, 0.5),
+                    args=(self._cdm_stop, CDM_POLL_INTERVAL if self._cdm_relay else APPROVAL_POLL_INTERVAL),
                     name=f"{self.service_tag}-cdm",
                     daemon=True,
                 ).start()
@@ -1831,7 +1838,7 @@ class RemoteService:
                 if self._cdm_requests == 0:
                     self._cdm_stop.set()
 
-    def poll_cdm_calls(self, stop: Event, interval: float = 0.5) -> None:
+    def poll_cdm_calls(self, stop: Event, interval: float = CDM_POLL_INTERVAL) -> None:
         # A poller whose request ended can still be inside its last GET while the next request's poller starts.
         # The next one never waits for it, since a CDM call would then go unfetched, and the old one never
         # shows or clears the notice that the next one owns.

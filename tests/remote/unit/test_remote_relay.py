@@ -650,6 +650,7 @@ def _wait_for(condition):
 def test_a_session_without_a_local_cdm_shows_a_post_login_approval_during_a_request(monkeypatch):
     shown = []
     monkeypatch.setattr(remote_service, "show_approval", shown.append)
+    monkeypatch.setattr(remote_service, "APPROVAL_POLL_INTERVAL", 0.01)
     svc, session = _authenticated_session(monkeypatch, local_cdm=None)
     session.release_first_prompt.set()
     svc.authenticate()
@@ -730,6 +731,30 @@ def test_a_delayed_prompt_response_does_not_clear_the_next_requests_headless_app
     second_gate.set()
     second.join(5)
     _wait_for(lambda: bridge.get_pending_approval() is None)
+
+
+def test_a_session_without_a_local_cdm_leaves_the_prompt_endpoint_alone_while_nothing_is_pending(monkeypatch):
+    svc, session = _authenticated_session(monkeypatch, local_cdm=None)
+    svc.authenticate()
+    session.prompt_gets = 0
+
+    request, gate = _request_thread(svc, session)
+    time.sleep(0.8)  # a poll every 0.5 s would have made a GET by now
+    gate.set()
+    request.join(5)
+
+    assert session.prompt_gets == 0
+
+
+def test_a_session_with_a_local_cdm_still_polls_for_cdm_calls_every_half_second(monkeypatch):
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    session.release_first_prompt.set()
+    svc.authenticate()
+
+    request, gate = _request_thread(svc, session)
+    _wait_for(lambda: session.prompt_gets >= 1)
+    gate.set()
+    request.join(5)
 
 
 async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):

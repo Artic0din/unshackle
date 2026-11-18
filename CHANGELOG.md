@@ -17,6 +17,7 @@ This changelog is automatically generated using [git-cliff](https://git-cliff.or
 - *auth*: Keep device approval codes out of durable logs
 - *auth*: Accept authentication observations and device approvals after a remote session has logged in
 - *auth*: Show a device approval that a service requests after login to the remote client
+- *auth*: Poll for device approvals every 15 seconds when the client has no local CDM, so it uses little of its API rate limit
 - *api*: Advertise pairing as a service authentication method
 - *api*: Reject excessively nested peer cache payloads
 - *cache*: Keep concurrent cache writes from corrupting shared entries

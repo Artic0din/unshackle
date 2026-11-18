@@ -231,6 +231,10 @@ entry under `serve.tiers`, or a `rate_limit` that is not a positive whole number
 server at startup, because the alternative is an API key that silently gets no limit. The rate
 limit never applies to the dashboard key, and never to `/api/health`.
 
+A remote client polls `GET /api/session/<id>/prompt` while its requests run, and each poll counts
+against its key: every 0.5 seconds with a local CDM (CDM calls need it), every 15 seconds without
+one (device approvals only). Budget a `rate_limit` for the first case accordingly.
+
 ## Services
 
 ```
