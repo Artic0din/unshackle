@@ -172,9 +172,7 @@ class InputBridge:
     def set_approval(self, approval: Optional[ApprovalNotice]) -> None:
         """Set or clear the approval owned by this remote session."""
         with self._lock:
-            if approval is not None and (
-                self._cancelled or self._status in (AuthStatus.AUTHENTICATED, AuthStatus.FAILED)
-            ):
+            if approval is not None and self._is_ended():
                 raise RuntimeError("Remote session is no longer active")
             self._approval = approval
 
@@ -188,9 +186,7 @@ class InputBridge:
         if observation is not None and not isinstance(observation, AuthenticationObservation):
             raise TypeError("Expected an AuthenticationObservation")
         with self._lock:
-            if observation is not None and (
-                self._cancelled or self._status in (AuthStatus.AUTHENTICATED, AuthStatus.FAILED)
-            ):
+            if observation is not None and self._is_ended():
                 raise RuntimeError("Remote session is no longer active")
             self._authentication_observation = observation
 
@@ -198,6 +194,14 @@ class InputBridge:
         """Return the current redacted authentication snapshot, if any."""
         with self._lock:
             return self._authentication_observation
+
+    def _is_ended(self) -> bool:
+        """True once the session was cancelled or failed; call it under the lock.
+
+        An authenticated session stays open: services report mid-run recovery and may ask
+        for a new device approval after login.
+        """
+        return self._cancelled or self._status is AuthStatus.FAILED
 
     def _active_authentication_method(self) -> Optional[AuthMethod]:
         observation = self._authentication_observation

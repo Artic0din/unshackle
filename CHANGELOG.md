@@ -15,6 +15,7 @@ This changelog is automatically generated using [git-cliff](https://git-cliff.or
 ### Bug Fixes
 
 - *auth*: Keep device approval codes out of durable logs
+- *auth*: Accept authentication observations and device approvals after a remote session has logged in
 - *api*: Advertise pairing as a service authentication method
 - *api*: Reject excessively nested peer cache payloads
 - *cache*: Keep concurrent cache writes from corrupting shared entries
