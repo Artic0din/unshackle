@@ -3288,7 +3288,8 @@ filtering. <code>--skip-dl</code> runs the license step but skips the actual seg
 <h2 id="choosing-quality">Choosing quality<a class="headerlink" href="#choosing-quality" title="Permanent link">&para;</a></h2>
 <h3 id="resolution">Resolution<a class="headerlink" href="#resolution" title="Permanent link">&para;</a></h3>
 <p><code>-q</code> / <code>--quality</code> takes one or more target resolutions (heights) as a comma-separated
-list. Without it, unshackle picks the <strong>best available</strong> resolution.</p>
+list. Without it, unshackle picks the <strong>best available</strong> resolution, or the lowest resolution with
+<code>--worst</code>.</p>
 <div class="language-shell highlight"><span class="filename">Single resolution</span><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>unshackle<span class="w"> </span>dl<span class="w"> </span>-q<span class="w"> </span><span class="m">1080</span><span class="w"> </span>EXAMPLE<span class="w"> </span><span class="m">81234567</span>
 </span></code></pre></div>
 <div class="language-shell highlight"><span class="filename">Multiple resolutions in one run</span><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>unshackle<span class="w"> </span>dl<span class="w"> </span>-q<span class="w"> </span><span class="m">2160</span>,1080,720<span class="w"> </span>EXAMPLE<span class="w"> </span><span class="m">81234567</span>
@@ -3318,10 +3319,13 @@ therefore keeps its <code>3840×1920</code> HDR10 track, even when another range
 </tr>
 <tr>
 <td><code>--worst</code></td>
-<td>Within the specified quality, pick the <strong>lowest</strong> bitrate rendition. <strong>Requires <code>-q/--quality</code>.</strong></td>
+<td>Pick the lowest-bitrate video at each requested resolution. With no requested resolution, pick the lowest-bitrate video at the lowest resolution.</td>
 </tr>
 </tbody>
 </table>
+<p>A <code>quality</code> in the config counts as a requested resolution. When <code>--best-available</code> finds none of the
+requested resolutions, <code>--worst</code> also picks from the lowest resolution. In hybrid mode, that is the
+lowest resolution that has an HDR10 or HDR10+ base.</p>
 <div class="language-shell highlight"><span class="filename">Never fail on a missing resolution</span><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>unshackle<span class="w"> </span>dl<span class="w"> </span>-q<span class="w"> </span><span class="m">2160</span><span class="w"> </span>--best-available<span class="w"> </span>EXAMPLE<span class="w"> </span>0ABC123
 </span></code></pre></div>
 <h2 id="video-codec-and-colour-range">Video codec and colour range<a class="headerlink" href="#video-codec-and-colour-range" title="Permanent link">&para;</a></h2>
@@ -3345,6 +3349,10 @@ either enum <strong>names</strong> or their <strong>values</strong>, comma-separ
 <td><code>H.265</code></td>
 </tr>
 <tr>
+<td><code>VVC</code></td>
+<td><code>H.266</code></td>
+</tr>
+<tr>
 <td><code>VC1</code></td>
 <td><code>VC-1</code></td>
 </tr>
@@ -3366,7 +3374,7 @@ either enum <strong>names</strong> or their <strong>values</strong>, comma-separ
 </tr>
 </tbody>
 </table>
-<p><code>H264</code> and <code>H265</code> are aliases of <code>AVC</code> and <code>HEVC</code>.</p>
+<p><code>H264</code>, <code>H265</code> and <code>H266</code> are aliases of <code>AVC</code>, <code>HEVC</code> and <code>VVC</code>.</p>
 <p>An LCEVC (MPEG-5 Part 2) track only adds detail on top of its base video track and cannot play
 alone, so unshackle selects it only when you ask for it with <code>-v LCEVC</code>.</p>
 <div class="language-shell highlight"><span class="filename">Either spelling works</span><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>unshackle<span class="w"> </span>dl<span class="w"> </span>-v<span class="w"> </span>HEVC<span class="w">   </span>EXAMPLE<span class="w"> </span><span class="m">81234567</span>
@@ -3546,7 +3554,9 @@ download and the HDR10 track are not changed.</p>
 </div>
 <h2 id="bitrate-selection">Bitrate selection<a class="headerlink" href="#bitrate-selection" title="Permanent link">&para;</a></h2>
 <p>By default unshackle keeps the highest-bitrate rendition for each selected
-resolution/codec/range/language combination. You can constrain this.</p>
+resolution/codec/range/language combination. One requested video language is one
+language here, also when it matches more than one regional tag (<code>en</code> can match
+<code>en-AU</code> and <code>en-GB</code>). You can constrain this.</p>
 <table>
 <thead>
 <tr>
@@ -3604,6 +3614,8 @@ That is the real <em>delivered</em> size, not an over-report or a bug.</p>
 declared-bitrate renditions of each quality tier, in parallel (video grouped by codec
 and range, audio by codec, channels, language, and descriptive flag). It extends a
 group downward while a lower unprobed rendition could still outrank a probed one.
+The lowest renditions are often not probed, so <code>--worst</code> usually compares their
+manifest bitrates.
 This keeps probing fast even when a service exposes dozens of renditions. A track
 whose duration unshackle cannot find falls back to <code>ffprobe</code>. A probe failure is
 non-fatal: the manifest value stays in place.</p>
@@ -4771,7 +4783,7 @@ authoritative list.</p>
 <tr>
 <td><code>--worst</code></td>
 <td></td>
-<td>Lowest bitrate within <code>-q</code>.</td>
+<td>Lowest-bitrate video at each requested resolution, or at the lowest resolution if none is set.</td>
 </tr>
 <tr>
 <td><code>--require-audio</code></td>
