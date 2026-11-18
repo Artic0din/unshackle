@@ -1417,8 +1417,8 @@ class RemoteService:
         status = result.get("status", "authenticated")
         if status == "authenticating":
             self.poll_auth_completion()
-        if create_data.get("cdm_relay"):
-            self.client.in_flight = self.answering_cdm_calls
+        # also without a local CDM: the poller shows post-login device approvals, not only relays CDM calls
+        self.client.in_flight = self.answering_cdm_calls
         self.drain_server_logs()
         self.start_keepalive()
 

@@ -534,6 +534,100 @@ def test_an_invalid_post_login_approval_does_not_stop_the_poller(monkeypatch):
     assert shown == [ApprovalNotice("Approve this device again"), None]
 
 
+class _FakeResponse:
+    status_code = 200
+    headers = {"Content-Type": "application/json"}
+    text = ""
+
+    def __init__(self, body):
+        self.body = body
+
+    def json(self):
+        return self.body
+
+
+class _ScriptedSession:
+    """A requests session whose prompt GETs and other requests are released by the test."""
+
+    def __init__(self, approval):
+        import threading
+
+        self.approval = approval
+        self.prompt_gets = 0
+        self.first_prompt_in_flight = threading.Event()
+        self.release_first_prompt = threading.Event()
+        self.request_gates = []
+
+    def post(self, url, timeout, json=None):
+        return _FakeResponse({"session_id": "sid", "status": "authenticated"})
+
+    def get(self, url, timeout, json=None):
+        if url.endswith("/prompt"):
+            self.prompt_gets += 1
+            if self.prompt_gets == 1:
+                self.first_prompt_in_flight.set()
+                assert self.release_first_prompt.wait(5)
+            return _FakeResponse({"status": "authenticated", "approval": self.approval})
+        assert self.request_gates.pop(0).wait(5)
+        return _FakeResponse({})
+
+
+def _authenticated_session(monkeypatch, local_cdm):
+    import logging
+    import threading
+
+    from unshackle.core.remote_service import RemoteClient
+
+    session = _ScriptedSession({"message": "Approve this device again"})
+    svc = remote_service.RemoteService.__new__(remote_service.RemoteService)
+    svc.client = RemoteClient("http://srv", "key")
+    svc.client._session = session
+    svc.ctx = SimpleNamespace(obj=SimpleNamespace(cdm=local_cdm, cdm_entry=False), parent=None)
+    svc.service_tag, svc.title_id, svc.log = "EXAMPLE", "t1", logging.getLogger("test")
+    svc._server_cdm, svc._server_accounts, svc._service_params, svc._client_config = None, {"global": True}, {}, None
+    svc._cdm_sessions, svc._cdm_lock, svc._cdm_requests = {}, threading.Lock(), 0
+    svc._cdm_stop = threading.Event()
+    svc.auth_approval, svc._input_bridge, svc._session = None, None, SimpleNamespace(proxies={})
+    svc.drain_server_logs = lambda: None
+    svc.start_keepalive = lambda: None
+    svc.close = lambda: None
+    monkeypatch.setattr(handlers.config, "cdm", {})
+    return svc, session
+
+
+def _request_thread(svc, session):
+    import threading
+
+    gate = threading.Event()
+    session.request_gates.append(gate)
+    thread = threading.Thread(target=svc.client.get, args=("/api/session/sid/titles",))
+    thread.start()
+    return thread, gate
+
+
+def _wait_for(condition):
+    deadline = time.monotonic() + 5
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_a_session_without_a_local_cdm_shows_a_post_login_approval_during_a_request(monkeypatch):
+    shown = []
+    monkeypatch.setattr(remote_service, "show_approval", shown.append)
+    svc, session = _authenticated_session(monkeypatch, local_cdm=None)
+    session.release_first_prompt.set()
+    svc.authenticate()
+
+    request, gate = _request_thread(svc, session)
+    _wait_for(lambda: shown)
+    gate.set()
+    request.join(5)
+    _wait_for(lambda: shown[-1:] == [None])
+
+    assert shown == [ApprovalNotice("Approve this device again"), None]
+
+
 async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):
     import threading as th
 
