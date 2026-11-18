@@ -2572,6 +2572,9 @@ an hour later. An API key with no tier and no override has no limit. A <code>tie
 entry under <code>serve.tiers</code>, or a <code>rate_limit</code> that is not a positive whole number, stops the
 server at startup, because the alternative is an API key that silently gets no limit. The rate
 limit never applies to the dashboard key, and never to <code>/api/health</code>.</p>
+<p>A remote client polls <code>GET /api/session/&lt;id&gt;/prompt</code> while its requests run, and each poll counts
+against its key: every 0.5 seconds with a local CDM (CDM calls need it), every 15 seconds without
+one (device approvals only). Budget a <code>rate_limit</code> for the first case accordingly.</p>
 <h2 id="services">Services<a class="headerlink" href="#services" title="Permanent link">&para;</a></h2>
 <div class="language-text highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>GET /api/dashboard/services
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>[{"tag": "EXAMPLE", "state": "staged", "error": null,
