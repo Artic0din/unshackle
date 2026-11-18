@@ -447,6 +447,9 @@ class _PollsThenStops:
         self.polls -= 1
         return self.polls < 0
 
+    def is_set(self) -> bool:
+        return False
+
 
 def _post_login_poller(monkeypatch, responses, bridge=None):
     import logging
@@ -554,11 +557,15 @@ class _ScriptedSession:
 
         self.approval = approval
         self.prompt_gets = 0
+        self.cdm_call = None
+        self.answers = []
         self.first_prompt_in_flight = threading.Event()
         self.release_first_prompt = threading.Event()
         self.request_gates = []
 
     def post(self, url, timeout, json=None):
+        if url.endswith("/prompt"):
+            self.answers.append(json)
         return _FakeResponse({"session_id": "sid", "status": "authenticated"})
 
     def get(self, url, timeout, json=None):
@@ -567,6 +574,8 @@ class _ScriptedSession:
             if self.prompt_gets == 1:
                 self.first_prompt_in_flight.set()
                 assert self.release_first_prompt.wait(5)
+            if self.cdm_call is not None and self.prompt_gets > 1:
+                return _FakeResponse({"status": "pending_input", "cdm_call": self.cdm_call})
             return _FakeResponse({"status": "authenticated", "approval": self.approval})
         assert self.request_gates.pop(0).wait(5)
         return _FakeResponse({})
@@ -654,6 +663,25 @@ def test_a_session_without_a_local_cdm_shows_a_post_login_approval_during_a_requ
     assert shown == [ApprovalNotice("Approve this device again"), None]
 
 
+def test_the_next_request_answers_a_cdm_call_while_the_previous_poll_is_still_running(monkeypatch):
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    session.cdm_call = {"op": "unknown"}
+    svc.authenticate()
+
+    first, first_gate = _request_thread(svc, session)
+    assert session.first_prompt_in_flight.wait(5)
+    first_gate.set()
+    first.join(5)
+
+    second, second_gate = _request_thread(svc, session)
+    _wait_for(lambda: session.answers)  # the first poll is still inside its GET
+    session.release_first_prompt.set()
+    second_gate.set()
+    second.join(5)
+
+    assert session.answers[0] == {"response": json.dumps({"error": "unknown CDM call 'unknown'"})}
+
+
 def test_a_delayed_prompt_response_does_not_clear_the_next_requests_approval_notice(monkeypatch, terminal_console):
     import threading
 
@@ -666,15 +694,42 @@ def test_a_delayed_prompt_response_does_not_clear_the_next_requests_approval_not
     first.join(5)
 
     second, second_gate = _request_thread(svc, session)
-    time.sleep(0.7)  # long enough for the next request's own poller to poll and show the notice
-    session.release_first_prompt.set()
     _wait_for(lambda: session.prompt_gets >= 2 and terminal_console._approval_renderables)
+    session.release_first_prompt.set()
+    _wait_for(lambda: len([t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"]) == 1)
+
+    assert len(terminal_console._approval_renderables) == 1
     second_gate.set()
     second.join(5)
     _wait_for(lambda: not [t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"])
 
     assert terminal_console._approval_renderables == {}
     assert terminal_console._approval_live is None
+
+
+def test_a_delayed_prompt_response_does_not_clear_the_next_requests_headless_approval(monkeypatch):
+    import threading
+
+    from unshackle.core.api.input_bridge import InputBridge
+
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    svc._input_bridge = bridge = InputBridge()
+    svc.authenticate()
+
+    first, first_gate = _request_thread(svc, session)
+    assert session.first_prompt_in_flight.wait(5)
+    first_gate.set()
+    first.join(5)
+
+    second, second_gate = _request_thread(svc, session)
+    _wait_for(lambda: bridge.get_pending_approval() is not None)
+    session.release_first_prompt.set()
+    _wait_for(lambda: len([t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"]) == 1)
+
+    assert bridge.get_pending_approval() == ApprovalNotice("Approve this device again")
+    second_gate.set()
+    second.join(5)
+    _wait_for(lambda: bridge.get_pending_approval() is None)
 
 
 async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):
