@@ -437,6 +437,103 @@ def test_headless_remote_login_routes_approval_through_its_session_bridge(monkey
     assert bridge.get_pending_approval() is None
 
 
+class _PollsThenStops:
+    """A stop event that lets the poller run a fixed number of polls."""
+
+    def __init__(self, polls: int) -> None:
+        self.polls = polls
+
+    def wait(self, interval: float) -> bool:
+        self.polls -= 1
+        return self.polls < 0
+
+
+def _post_login_poller(monkeypatch, responses, bridge=None):
+    import logging
+
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def json(self):
+            return self.body
+
+    class Session:
+        def get(self, url, timeout):
+            return Response(next(responses))
+
+    remote = object.__new__(remote_service.RemoteService)
+    remote.client = SimpleNamespace(server_url="http://srv", session=Session())
+    remote._session_id, remote.auth_approval, remote._input_bridge = "sid", None, bridge
+    remote.log, remote._cdm_sessions = logging.getLogger("test"), {}
+    monkeypatch.setattr(remote_service.RemoteService, "local_cdm", None)
+    return remote
+
+
+def test_a_post_login_approval_is_shown_and_cleared_while_requests_run(monkeypatch):
+    shown = []
+    monkeypatch.setattr(remote_service, "show_approval", shown.append)
+    responses = iter(
+        [
+            {"status": "authenticated"},
+            {"status": "authenticated", "approval": {"message": "Approve this device again"}},
+            {"status": "authenticated", "approval": {"message": "Approve this device again"}},
+            {"status": "authenticated"},
+        ]
+    )
+    remote = _post_login_poller(monkeypatch, responses)
+
+    remote.poll_cdm_calls(_PollsThenStops(4), interval=0)
+
+    assert shown == [ApprovalNotice("Approve this device again"), None]
+    assert remote.auth_approval is None
+
+
+def test_a_post_login_approval_is_cleared_when_the_last_request_ends(monkeypatch):
+    shown = []
+    monkeypatch.setattr(remote_service, "show_approval", shown.append)
+    responses = iter([{"status": "authenticated", "approval": {"message": "Approve this device again"}}])
+    remote = _post_login_poller(monkeypatch, responses)
+
+    remote.poll_cdm_calls(_PollsThenStops(1), interval=0)
+
+    assert shown == [ApprovalNotice("Approve this device again"), None]
+    assert remote.auth_approval is None
+
+
+def test_a_post_login_approval_reaches_a_headless_sessions_bridge(monkeypatch):
+    from unshackle.core.api.input_bridge import InputBridge
+
+    monkeypatch.setattr(remote_service, "show_approval", lambda approval: pytest.fail("used shared console"))
+    bridge = InputBridge()
+    responses = iter([{"status": "authenticated", "approval": {"message": "Approve this device again"}}])
+    remote = _post_login_poller(monkeypatch, responses, bridge)
+    seen = []
+    real_set = bridge.set_approval
+    bridge.set_approval = lambda approval: (seen.append(approval), real_set(approval))
+
+    remote.poll_cdm_calls(_PollsThenStops(1), interval=0)
+
+    assert seen == [ApprovalNotice("Approve this device again"), None]
+    assert bridge.get_pending_approval() is None
+
+
+def test_an_invalid_post_login_approval_does_not_stop_the_poller(monkeypatch):
+    shown = []
+    monkeypatch.setattr(remote_service, "show_approval", shown.append)
+    responses = iter(
+        [
+            {"status": "authenticated", "approval": {"message": ""}},
+            {"status": "authenticated", "approval": {"message": "Approve this device again"}},
+        ]
+    )
+    remote = _post_login_poller(monkeypatch, responses)
+
+    remote.poll_cdm_calls(_PollsThenStops(2), interval=0)
+
+    assert shown == [ApprovalNotice("Approve this device again"), None]
+
+
 async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):
     import threading as th
 

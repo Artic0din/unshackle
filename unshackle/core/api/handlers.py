@@ -4557,11 +4557,12 @@ def require_authenticated(session: Any) -> None:
 
 
 async def session_prompt_get_handler(session_id: str, request: Optional[web.Request] = None) -> web.Response:
-    """Poll for pending interactive prompts during authentication, and for CDM calls at any time.
+    """Poll for pending interactive prompts during authentication, and for CDM calls and approvals at any time.
 
     Returns the current auth status and any pending prompt that the
     remote client should display to the user. A CDM call comes first, because service code can
-    wait on the client's CDM after authentication too, for example in get_tracks.
+    wait on the client's CDM after authentication too, for example in get_tracks. A device
+    approval that a service requests after login rides on the ``authenticated`` status.
     """
     session = await get_validated_session(session_id, request)
 
@@ -4577,7 +4578,9 @@ async def session_prompt_get_handler(session_id: str, request: Optional[web.Requ
         return response({"status": "pending_input", "prompt": bridge.get_pending_prompt(), "cdm_call": cdm_call})
 
     if session.auth_status == AuthStatus.AUTHENTICATED:
-        return response({"status": "authenticated"})
+        # A service can ask for a device approval after login, and the client polls to show it.
+        approval = bridge.get_pending_approval() if bridge else None
+        return response({"status": "authenticated", **({"approval": approval.to_dict()} if approval else {})})
 
     if session.auth_status == AuthStatus.FAILED:
         return response({"status": "failed", "error": session.auth_error or "unknown error"})

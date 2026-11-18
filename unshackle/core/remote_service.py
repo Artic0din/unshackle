@@ -1697,23 +1697,26 @@ class RemoteService:
         else:
             publish_authentication(observation)
 
+    def relay_approval(self, raw_approval: Any) -> None:
+        """Show the server's pending device approval, or clear it, on this login's owning session or job."""
+        try:
+            approval = ApprovalNotice.from_dict(raw_approval) if raw_approval is not None else None
+        except (TypeError, ValueError):
+            raise RemoteError("Remote auth returned an invalid approval payload", "AUTH") from None
+        if approval != self.auth_approval:
+            self.auth_approval = approval
+            if self._input_bridge is not None:
+                self._input_bridge.set_approval(approval)
+            else:
+                show_approval(approval)
+
     def poll_auth(self, deadline: float, poll_interval: float) -> None:
         while time.monotonic() < deadline:
             resp = self.client.get(f"/api/session/{self._session_id}/prompt")
             status = resp.get("status")
             self.drain_server_logs()
 
-            raw_approval = resp.get("approval")
-            try:
-                approval = ApprovalNotice.from_dict(raw_approval) if raw_approval is not None else None
-            except (TypeError, ValueError):
-                raise RemoteError("Remote auth returned an invalid approval payload", "AUTH") from None
-            if approval != self.auth_approval:
-                self.auth_approval = approval
-                if self._input_bridge is not None:
-                    self._input_bridge.set_approval(approval)
-                else:
-                    show_approval(approval)
+            self.relay_approval(resp.get("approval"))
 
             if "authentication" in resp:
                 raw_observation = resp["authentication"]
@@ -1815,12 +1818,17 @@ class RemoteService:
         sessions: Dict[str, bytes] = {}
         while not stop.wait(interval):
             try:
-                call = self.client.session.get(url, timeout=30).json().get("cdm_call")
+                body = self.client.session.get(url, timeout=30).json()
+                # A service can also ask for a device approval after login; show it like a login one.
+                self.relay_approval(body.get("approval"))
+                call = body.get("cdm_call")
                 if isinstance(call, dict):
                     with quiet():
                         self.answer_cdm_call(call, sessions)
             except (requests.RequestException, ValueError, SystemExit) as e:
                 self.log.debug(f"CDM call poll failed: {e}")
+        # show_approval clears per thread, so this thread clears the approval it showed
+        self.relay_approval(None)
         self.close_cdm_sessions(sessions)
 
     def close_cdm_sessions(self, sessions: Optional[Dict[str, bytes]] = None) -> None:
