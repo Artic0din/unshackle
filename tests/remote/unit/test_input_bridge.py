@@ -123,6 +123,46 @@ def test_cancel_clears_approval() -> None:
     assert bridge.get_pending_approval() is None
 
 
+def test_observation_after_authentication_replaces_the_final_one() -> None:
+    """Services report mid-run recovery after login, so an authenticated session must still take it."""
+    bridge = InputBridge()
+    bridge.status = AuthStatus.AUTHENTICATED
+    repairing = AuthenticationObservation(AuthenticationState.REPAIRING, method="pairing")
+
+    bridge.set_authentication_observation(repairing)
+
+    assert bridge.get_authentication_observation() == repairing
+    assert bridge.status is AuthStatus.AUTHENTICATED
+
+
+def test_approval_after_authentication_is_shown_and_cleared() -> None:
+    bridge = InputBridge()
+    bridge.status = AuthStatus.AUTHENTICATED
+    approval = ApprovalNotice("Approve this device again")
+
+    bridge.set_approval(approval)
+    assert bridge.get_pending_approval() == approval
+
+    bridge.set_approval(None)
+    assert bridge.get_pending_approval() is None
+
+
+@pytest.mark.parametrize("end", ["cancelled", "failed"])
+def test_observation_and_approval_are_refused_once_the_session_has_ended(end: str) -> None:
+    bridge = InputBridge()
+    if end == "cancelled":
+        bridge.cancel()
+    else:
+        bridge.status = AuthStatus.FAILED
+
+    with pytest.raises(RuntimeError, match="no longer active"):
+        bridge.set_authentication_observation(
+            AuthenticationObservation(AuthenticationState.REPAIRING, method="pairing")
+        )
+    with pytest.raises(RuntimeError, match="no longer active"):
+        bridge.set_approval(ApprovalNotice("Approve this device"))
+
+
 def test_authentication_observation_is_owned_and_terminal_cleanup_is_classified() -> None:
     bridge = InputBridge()
     other = InputBridge()
