@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 import time
 from types import SimpleNamespace
 
@@ -435,6 +436,419 @@ def test_headless_remote_login_routes_approval_through_its_session_bridge(monkey
     remote.poll_auth_completion(poll_interval=0)
 
     assert bridge.get_pending_approval() is None
+
+
+class _PollsThenStops:
+    """A stop event that lets the poller run a fixed number of polls."""
+
+    def __init__(self, polls: int) -> None:
+        self.polls = polls
+
+    def wait(self, interval: float) -> bool:
+        self.polls -= 1
+        return self.polls < 0
+
+    def is_set(self) -> bool:
+        return False
+
+
+def _post_login_poller(monkeypatch, responses, bridge=None):
+    import logging
+
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def json(self):
+            return self.body
+
+    class Session:
+        def get(self, url, timeout):
+            return Response(next(responses))
+
+    remote = object.__new__(remote_service.RemoteService)
+    remote.client = SimpleNamespace(server_url="http://srv", session=Session())
+    remote._session_id, remote.auth_approval, remote._input_bridge = "sid", None, bridge
+    remote.log, remote._cdm_sessions = logging.getLogger("test"), {}
+    monkeypatch.setattr(remote_service.RemoteService, "local_cdm", None)
+    return remote
+
+
+def test_a_post_login_approval_is_shown_and_cleared_while_requests_run(monkeypatch):
+    shown = []
+    monkeypatch.setattr(remote_service, "show_approval", shown.append)
+    responses = iter(
+        [
+            {"status": "authenticated"},
+            {"status": "authenticated", "approval": {"message": "Approve this device again"}},
+            {"status": "authenticated", "approval": {"message": "Approve this device again"}},
+            {"status": "authenticated"},
+        ]
+    )
+    remote = _post_login_poller(monkeypatch, responses)
+
+    remote.poll_cdm_calls(_PollsThenStops(4), interval=0)
+
+    assert shown == [ApprovalNotice("Approve this device again"), None]
+    assert remote.auth_approval is None
+
+
+def test_a_post_login_approval_is_cleared_when_the_last_request_ends(monkeypatch):
+    shown = []
+    monkeypatch.setattr(remote_service, "show_approval", shown.append)
+    responses = iter([{"status": "authenticated", "approval": {"message": "Approve this device again"}}])
+    remote = _post_login_poller(monkeypatch, responses)
+
+    remote.poll_cdm_calls(_PollsThenStops(1), interval=0)
+
+    assert shown == [ApprovalNotice("Approve this device again"), None]
+    assert remote.auth_approval is None
+
+
+def test_a_post_login_approval_reaches_a_headless_sessions_bridge(monkeypatch):
+    from unshackle.core.api.input_bridge import InputBridge
+
+    monkeypatch.setattr(remote_service, "show_approval", lambda approval: pytest.fail("used shared console"))
+    bridge = InputBridge()
+    responses = iter([{"status": "authenticated", "approval": {"message": "Approve this device again"}}])
+    remote = _post_login_poller(monkeypatch, responses, bridge)
+    seen = []
+    real_set = bridge.set_approval
+    bridge.set_approval = lambda approval: (seen.append(approval), real_set(approval))
+
+    remote.poll_cdm_calls(_PollsThenStops(1), interval=0)
+
+    assert seen == [ApprovalNotice("Approve this device again"), None]
+    assert bridge.get_pending_approval() is None
+
+
+def test_an_invalid_post_login_approval_does_not_stop_the_poller(monkeypatch):
+    shown = []
+    monkeypatch.setattr(remote_service, "show_approval", shown.append)
+    responses = iter(
+        [
+            {"status": "authenticated", "approval": {"message": ""}},
+            {"status": "authenticated", "approval": {"message": "Approve this device again"}},
+        ]
+    )
+    remote = _post_login_poller(monkeypatch, responses)
+
+    remote.poll_cdm_calls(_PollsThenStops(2), interval=0)
+
+    assert shown == [ApprovalNotice("Approve this device again"), None]
+
+
+class _FakeResponse:
+    status_code = 200
+    headers = {"Content-Type": "application/json"}
+    text = ""
+
+    def __init__(self, body):
+        self.body = body
+
+    def json(self):
+        return self.body
+
+
+class _ScriptedSession:
+    """A requests session whose prompt GETs and other requests are released by the test."""
+
+    def __init__(self, approval):
+        import threading
+
+        self.approval = approval
+        self.prompt_gets = 0
+        self.held_get = 1
+        self.cdm_call = None
+        self.answers = []
+        self.first_prompt_in_flight = threading.Event()
+        self.release_first_prompt = threading.Event()
+        self.request_gates = []
+
+    def post(self, url, timeout, json=None):
+        if url.endswith("/prompt"):
+            self.answers.append(json)
+        return _FakeResponse({"session_id": "sid", "status": "authenticated"})
+
+    def get(self, url, timeout, json=None):
+        if url.endswith("/prompt"):
+            self.prompt_gets += 1
+            if self.prompt_gets == self.held_get:
+                self.first_prompt_in_flight.set()
+                assert self.release_first_prompt.wait(5)
+            if self.cdm_call is not None and self.prompt_gets > 1:
+                return _FakeResponse({"status": "pending_input", "cdm_call": self.cdm_call})
+            return _FakeResponse({"status": "authenticated", "approval": self.approval})
+        assert self.request_gates.pop(0).wait(5)
+        return _FakeResponse({})
+
+
+def _authenticated_session(monkeypatch, local_cdm):
+    import logging
+    import threading
+
+    from unshackle.core.remote_service import RemoteClient
+
+    session = _ScriptedSession({"message": "Approve this device again"})
+    svc = remote_service.RemoteService.__new__(remote_service.RemoteService)
+    svc.client = RemoteClient("http://srv", "key")
+    svc.client._session = session
+    svc.ctx = SimpleNamespace(obj=SimpleNamespace(cdm=local_cdm, cdm_entry=False), parent=None)
+    svc.service_tag, svc.title_id, svc.log = "EXAMPLE", "t1", logging.getLogger("test")
+    svc._server_cdm, svc._server_accounts, svc._service_params, svc._client_config = None, {"global": True}, {}, None
+    svc._cdm_sessions, svc._cdm_lock, svc._cdm_requests = {}, threading.Lock(), 0
+    svc._cdm_stop, svc._cdm_poller = threading.Event(), None
+    svc.auth_approval, svc._input_bridge, svc._session = None, None, SimpleNamespace(proxies={})
+    svc.drain_server_logs = lambda: None
+    svc.start_keepalive = lambda: None
+    svc.close = lambda: None
+    monkeypatch.setattr(handlers.config, "cdm", {})
+    return svc, session
+
+
+class _FakeLive:
+    def __init__(self, renderable, **kwargs):
+        self.running = False
+
+    def start(self):
+        self.running = True
+
+    def update(self, renderable, refresh=False):
+        pass
+
+    def stop(self):
+        self.running = False
+
+
+@pytest.fixture
+def terminal_console(monkeypatch):
+    from unshackle.core import console as console_module
+
+    monkeypatch.setattr(console_module, "console", SimpleNamespace(is_terminal=True))
+    monkeypatch.setattr(console_module, "SyncLive", _FakeLive)
+    monkeypatch.setattr(console_module, "_approval_handler", None)
+    monkeypatch.setattr(console_module, "_approval_live", None)
+    monkeypatch.setattr(console_module, "_approval_renderables", {})
+    return console_module
+
+
+def _request_thread(svc, session):
+    import threading
+
+    gate = threading.Event()
+    session.request_gates.append(gate)
+    thread = threading.Thread(target=svc.client.get, args=("/api/session/sid/titles",))
+    thread.start()
+    return thread, gate
+
+
+def _wait_for(condition):
+    deadline = time.monotonic() + 5
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_a_session_without_a_local_cdm_shows_a_post_login_approval_during_a_request(monkeypatch):
+    shown = []
+    monkeypatch.setattr(remote_service, "show_approval", shown.append)
+    monkeypatch.setattr(remote_service, "APPROVAL_POLL_INTERVAL", 0.01)
+    svc, session = _authenticated_session(monkeypatch, local_cdm=None)
+    session.release_first_prompt.set()
+    svc.authenticate()
+
+    request, gate = _request_thread(svc, session)
+    _wait_for(lambda: shown)
+    gate.set()
+    request.join(5)
+    _wait_for(lambda: shown[-1:] == [None])
+
+    assert shown == [ApprovalNotice("Approve this device again"), None]
+
+
+def test_the_next_request_answers_a_cdm_call_while_the_previous_poll_is_still_running(monkeypatch):
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    session.cdm_call = {"op": "unknown"}
+    svc.authenticate()
+
+    first, first_gate = _request_thread(svc, session)
+    assert session.first_prompt_in_flight.wait(5)
+    first_gate.set()
+    first.join(5)
+
+    second, second_gate = _request_thread(svc, session)
+    _wait_for(lambda: session.answers)  # the first poll is still inside its GET
+    session.release_first_prompt.set()
+    second_gate.set()
+    second.join(5)
+
+    assert session.answers[0] == {"response": json.dumps({"error": "unknown CDM call 'unknown'"})}
+
+
+def test_a_delayed_prompt_response_does_not_clear_the_next_requests_approval_notice(monkeypatch, terminal_console):
+    import threading
+
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    svc.authenticate()
+
+    first, first_gate = _request_thread(svc, session)
+    assert session.first_prompt_in_flight.wait(5)
+    first_gate.set()
+    first.join(5)
+
+    second, second_gate = _request_thread(svc, session)
+    _wait_for(lambda: session.prompt_gets >= 2 and terminal_console._approval_renderables)
+    session.release_first_prompt.set()
+    _wait_for(lambda: len([t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"]) == 1)
+
+    assert len(terminal_console._approval_renderables) == 1
+    second_gate.set()
+    second.join(5)
+    _wait_for(lambda: not [t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"])
+
+    assert terminal_console._approval_renderables == {}
+    assert terminal_console._approval_live is None
+
+
+def test_a_delayed_prompt_response_does_not_clear_the_next_requests_headless_approval(monkeypatch):
+    import threading
+
+    from unshackle.core.api.input_bridge import InputBridge
+
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    svc._input_bridge = bridge = InputBridge()
+    svc.authenticate()
+
+    first, first_gate = _request_thread(svc, session)
+    assert session.first_prompt_in_flight.wait(5)
+    first_gate.set()
+    first.join(5)
+
+    second, second_gate = _request_thread(svc, session)
+    _wait_for(lambda: bridge.get_pending_approval() is not None)
+    session.release_first_prompt.set()
+    _wait_for(lambda: len([t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"]) == 1)
+
+    assert bridge.get_pending_approval() == ApprovalNotice("Approve this device again")
+    second_gate.set()
+    second.join(5)
+    _wait_for(lambda: bridge.get_pending_approval() is None)
+
+
+def test_a_predecessors_second_prompt_response_does_not_clear_an_approval_the_next_poller_already_fetched(monkeypatch):
+    import threading
+
+    from unshackle.core.api.input_bridge import InputBridge
+
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    session.held_get = 2
+    svc._input_bridge = bridge = InputBridge()
+    svc.authenticate()
+
+    first, first_gate = _request_thread(svc, session)
+    assert session.first_prompt_in_flight.wait(5)
+    assert bridge.get_pending_approval() == ApprovalNotice("Approve this device again")
+    first_gate.set()
+    first.join(5)
+
+    second, second_gate = _request_thread(svc, session)
+    _wait_for(lambda: session.prompt_gets >= 3)
+    session.release_first_prompt.set()
+    _wait_for(lambda: len([t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"]) == 1)
+
+    assert bridge.get_pending_approval() == ApprovalNotice("Approve this device again")
+    second_gate.set()
+    second.join(5)
+    _wait_for(lambda: bridge.get_pending_approval() is None)
+
+
+def test_a_predecessors_cleanup_does_not_clear_the_next_pollers_approval_in_a_download_worker(monkeypatch):
+    import os
+    import threading
+
+    from unshackle.core.api import download_worker
+    from unshackle.core.console import set_approval_handler, set_authentication_handler, set_prompt_handler
+
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(fileno=lambda: read_fd))
+    updates = []
+    approval = {"approval": {"message": "Approve this device again"}}
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    session.held_get = 2
+    download_worker.relay_prompts(updates.append)
+    try:
+        svc.authenticate()
+
+        first, first_gate = _request_thread(svc, session)
+        assert session.first_prompt_in_flight.wait(5)
+        assert updates == [approval]
+        first_gate.set()
+        first.join(5)
+
+        second, second_gate = _request_thread(svc, session)
+        _wait_for(lambda: session.prompt_gets >= 3)
+        session.release_first_prompt.set()
+        _wait_for(lambda: len([t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"]) == 1)
+
+        assert {"approval": None} not in updates
+        second_gate.set()
+        second.join(5)
+        _wait_for(lambda: updates[-1] == {"approval": None})
+    finally:
+        set_prompt_handler(None)
+        set_approval_handler(None)
+        set_authentication_handler(None)
+        os.close(write_fd)
+
+
+def test_a_handlers_approval_is_cleared_only_by_the_poller_that_last_saw_it_and_set_again_after(monkeypatch):
+    from unshackle.core.console import set_approval_handler
+
+    updates = []
+    set_approval_handler(updates.append)
+    try:
+        svc, _ = _authenticated_session(monkeypatch, local_cdm=None)
+        old, new = object(), object()
+        notice = {"message": "Approve this device again"}
+
+        shown = svc.relay_approval(notice, None, old)
+        svc.relay_approval(notice, None, new)
+        svc.relay_approval(None, shown, old)
+        assert updates == [ApprovalNotice("Approve this device again")]
+
+        svc.relay_approval(None, shown, new)
+        svc.relay_approval(notice, None, old)
+        assert updates == [
+            ApprovalNotice("Approve this device again"),
+            None,
+            ApprovalNotice("Approve this device again"),
+        ]
+    finally:
+        set_approval_handler(None)
+
+
+def test_a_session_without_a_local_cdm_leaves_the_prompt_endpoint_alone_while_nothing_is_pending(monkeypatch):
+    svc, session = _authenticated_session(monkeypatch, local_cdm=None)
+    svc.authenticate()
+    session.prompt_gets = 0
+
+    request, gate = _request_thread(svc, session)
+    time.sleep(0.8)  # a poll every 0.5 s would have made a GET by now
+    gate.set()
+    request.join(5)
+
+    assert session.prompt_gets == 0
+
+
+def test_a_session_with_a_local_cdm_still_polls_for_cdm_calls_every_half_second(monkeypatch):
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    session.release_first_prompt.set()
+    svc.authenticate()
+
+    request, gate = _request_thread(svc, session)
+    _wait_for(lambda: session.prompt_gets >= 1)
+    gate.set()
+    request.join(5)
 
 
 async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):

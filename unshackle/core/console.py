@@ -585,6 +585,11 @@ def set_approval_handler(handler: Optional[Callable[[Optional[ApprovalNotice]], 
     _approval_handler = handler
 
 
+def approval_handler_active() -> bool:
+    """Whether approvals go to one handler shared by every thread, not to a terminal that shows per thread."""
+    return _approval_handler is not None
+
+
 def show_approval(approval: Optional[ApprovalNotice]) -> None:
     """Show an approval transiently, or clear the active approval with ``None``."""
     global _approval_live

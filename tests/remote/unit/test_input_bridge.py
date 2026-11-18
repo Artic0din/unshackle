@@ -228,3 +228,25 @@ def test_request_input_after_authentication_fails_fast() -> None:
     with pytest.raises(RuntimeError, match="after authentication"):
         bridge.request_input("Pick a profile", timeout=5)
     assert bridge.status is AuthStatus.AUTHENTICATED
+
+
+async def test_prompt_handler_returns_the_approval_of_an_authenticated_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A service can ask for a device approval after login, and the client polls to show it."""
+    from unshackle.core.api import handlers
+
+    bridge = InputBridge()
+    bridge.status = AuthStatus.AUTHENTICATED
+    bridge.set_approval(ApprovalNotice("Approve this device again"))
+    session = SimpleNamespace(input_bridge=bridge, auth_status=AuthStatus.AUTHENTICATED, auth_error=None)
+
+    async def get_session(session_id: str, request=None):
+        return session
+
+    monkeypatch.setattr(handlers, "get_validated_session", get_session)
+    body = loads((await handlers.session_prompt_get_handler("session-a")).text)
+
+    assert body["status"] == "authenticated"
+    assert body["approval"] == {"message": "Approve this device again"}
+
+    bridge.set_approval(None)
+    assert "approval" not in loads((await handlers.session_prompt_get_handler("session-a")).text)

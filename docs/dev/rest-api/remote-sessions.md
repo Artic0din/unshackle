@@ -535,6 +535,16 @@ layer.
   client also polls while its own requests run. A call that no client fetches within 10 seconds
   fails then, because no client is listening. A fetched call waits 60 seconds for its answer.
   The call leaves the auth status as it was. An answer never marks the remote session as client-authenticated.
+- A device approval (`Service.wait_for_approval`, for example a pair code the user enters on another
+  device) also works after authentication, for example to renew a pairing in `get_titles()`. The
+  prompt endpoint returns it with the `authenticated` status, and the client shows it while its own
+  requests run, the same way it shows one during login. It clears when the service's wait ends. The
+  wait ends when the service's own check succeeds or times out, not on a client answer.
+  The client finds the approval by polling the prompt endpoint while its own requests run, and every
+  poll counts against its API rate limit (`serve.tiers`). A client with a local CDM already polls
+  every 0.5 seconds to relay CDM calls, so the approval adds no request. A client without one polls
+  every 15 seconds, so it costs at most 240 requests an hour, and a request that ends within 15
+  seconds costs none. The notice can appear up to 15 seconds after the wait begins.
 - `AUTH_INPUT_TIMEOUT = 600.0` seconds. This is also the TTL granted to
   `AUTHENTICATING` / `PENDING_INPUT` sessions in the store.
 
@@ -542,7 +552,9 @@ layer.
 
 ```json
 { "status": "authenticated" }
+{ "status": "authenticated", "approval": { "message": "Open the provider and enter ABCD" } }
 { "status": "authenticating" }
+{ "status": "authenticating", "approval": { "message": "Open the provider and enter ABCD" } }
 { "status": "pending_input", "prompt": "Enter code: " }
 { "status": "pending_input", "prompt": "...", "cdm_call": { "op": "challenge", "drm": "widevine", "init_data": "...", "license_type": "OFFLINE", "privacy_mode": true, "service_certificate": "..." } }
 { "status": "failed", "error": "...message..." }

@@ -45,7 +45,14 @@ from unshackle.core.authentication import (
     AuthenticationState,
 )
 from unshackle.core.config import config
-from unshackle.core.console import SyncLive, console, prompt_user, publish_authentication, show_approval
+from unshackle.core.console import (
+    SyncLive,
+    approval_handler_active,
+    console,
+    prompt_user,
+    publish_authentication,
+    show_approval,
+)
 from unshackle.core.constants import AnyTrack
 from unshackle.core.credential import Credential
 from unshackle.core.drm import BlowfishStripe, cbcs, real_kids
@@ -82,6 +89,11 @@ RETRY_AFTER_LOCK = Lock()
 RATE_LIMIT_TRIES = 3
 TUNNEL_SLOT_POLL = 15
 REOPEN_WAIT = 1800.0  # seconds a lost session waits for its server to come back; covers a deploy's whole drain
+# Seconds between prompt GETs while a request runs. Each GET counts against the client's API rate limit.
+# A client that relays CDM calls polls fast, because the server drops a call that no GET fetches within 10 seconds.
+# One without a local CDM polls only to show a device approval, which stays up for minutes.
+CDM_POLL_INTERVAL = 0.5
+APPROVAL_POLL_INTERVAL = 15.0
 
 
 class _Mute(local):
@@ -1067,6 +1079,10 @@ class RemoteService:
     ANIME: bool = False
     DAILY: bool = False
     server_cdm_type: str = "widevine"
+    # the poller or login that set the shared approval, and so the only one that clears it
+    _approval_owner: Optional[object] = None
+    # what this service last passed to an approval handler, which cannot be read back like a bridge
+    _approval_sent: Optional[ApprovalNotice] = None
 
     def __init__(
         self,
@@ -1147,6 +1163,7 @@ class RemoteService:
         self._cdm_lock = Lock()
         self._cdm_requests = 0
         self._cdm_stop = Event()
+        self._cdm_relay = False
         self.apply_service_config(svc_config)
 
     def apply_service_config(self, svc_config: dict) -> None:
@@ -1417,8 +1434,9 @@ class RemoteService:
         status = result.get("status", "authenticated")
         if status == "authenticating":
             self.poll_auth_completion()
-        if create_data.get("cdm_relay"):
-            self.client.in_flight = self.answering_cdm_calls
+        # also without a local CDM: the poller shows post-login device approvals, not only relays CDM calls
+        self._cdm_relay = bool(create_data.get("cdm_relay"))
+        self.client.in_flight = self.answering_cdm_calls
         self.drain_server_logs()
         self.start_keepalive()
 
@@ -1697,23 +1715,46 @@ class RemoteService:
         else:
             publish_authentication(observation)
 
+    def relay_approval(
+        self, raw_approval: Any, shown: Optional[ApprovalNotice], owner: object
+    ) -> Optional[ApprovalNotice]:
+        """Show the server's pending device approval, or clear it, on this login's owning session or job.
+
+        ``shown`` is what ``owner`` last showed, and the return value is what it shows now. A terminal shows
+        per thread, so a caller clears only its own notice. A session's bridge and a download worker's handler
+        hold one notice for every caller, so only the caller that last saw it pending clears it, and a later
+        caller re-sets a notice that was cleared.
+        """
+        try:
+            approval = ApprovalNotice.from_dict(raw_approval) if raw_approval is not None else None
+        except (TypeError, ValueError):
+            raise RemoteError("Remote auth returned an invalid approval payload", "AUTH") from None
+        bridge = self._input_bridge
+        if bridge is None and not approval_handler_active():
+            if approval != shown:
+                show_approval(approval)
+            return approval
+        # A bridge, or a download worker's handler, holds one notice for every caller.
+        pending = bridge.get_pending_approval() if bridge is not None else self._approval_sent
+        publish = bridge.set_approval if bridge is not None else show_approval
+        if approval is not None:
+            # Take ownership even when the notice is already up: a predecessor's last GET can still clear it.
+            if pending != approval:
+                publish(approval)
+                self._approval_sent = approval
+            self._approval_owner = owner
+        elif self._approval_owner is owner:
+            publish(None)
+            self._approval_sent = self._approval_owner = None
+        return approval
+
     def poll_auth(self, deadline: float, poll_interval: float) -> None:
         while time.monotonic() < deadline:
             resp = self.client.get(f"/api/session/{self._session_id}/prompt")
             status = resp.get("status")
             self.drain_server_logs()
 
-            raw_approval = resp.get("approval")
-            try:
-                approval = ApprovalNotice.from_dict(raw_approval) if raw_approval is not None else None
-            except (TypeError, ValueError):
-                raise RemoteError("Remote auth returned an invalid approval payload", "AUTH") from None
-            if approval != self.auth_approval:
-                self.auth_approval = approval
-                if self._input_bridge is not None:
-                    self._input_bridge.set_approval(approval)
-                else:
-                    show_approval(approval)
+            self.auth_approval = self.relay_approval(resp.get("approval"), self.auth_approval, self)
 
             if "authentication" in resp:
                 raw_observation = resp["authentication"]
@@ -1800,7 +1841,10 @@ class RemoteService:
             if self._cdm_requests == 1:
                 self._cdm_stop = Event()
                 Thread(
-                    target=self.poll_cdm_calls, args=(self._cdm_stop,), name=f"{self.service_tag}-cdm", daemon=True
+                    target=self.poll_cdm_calls,
+                    args=(self._cdm_stop, CDM_POLL_INTERVAL if self._cdm_relay else APPROVAL_POLL_INTERVAL),
+                    name=f"{self.service_tag}-cdm",
+                    daemon=True,
                 ).start()
         try:
             yield
@@ -1810,17 +1854,26 @@ class RemoteService:
                 if self._cdm_requests == 0:
                     self._cdm_stop.set()
 
-    def poll_cdm_calls(self, stop: Event, interval: float = 0.5) -> None:
+    def poll_cdm_calls(self, stop: Event, interval: float = CDM_POLL_INTERVAL) -> None:
+        # A poller whose request ended can still be inside its last GET while the next request's poller starts.
+        # The next one never waits for it, since a CDM call would then go unfetched, and the old one never
+        # shows or clears the notice that the next one owns.
         url = f"{self.client.server_url}/api/session/{self._session_id}/prompt"
         sessions: Dict[str, bytes] = {}
+        shown: Optional[ApprovalNotice] = None
         while not stop.wait(interval):
             try:
-                call = self.client.session.get(url, timeout=30).json().get("cdm_call")
+                body = self.client.session.get(url, timeout=30).json()
+                # A service can also ask for a device approval after login; show it like a login one.
+                if not stop.is_set():
+                    shown = self.relay_approval(body.get("approval"), shown, stop)
+                call = body.get("cdm_call")
                 if isinstance(call, dict):
                     with quiet():
                         self.answer_cdm_call(call, sessions)
             except (requests.RequestException, ValueError, SystemExit) as e:
                 self.log.debug(f"CDM call poll failed: {e}")
+        self.relay_approval(None, shown, stop)
         self.close_cdm_sessions(sessions)
 
     def close_cdm_sessions(self, sessions: Optional[Dict[str, bytes]] = None) -> None:
