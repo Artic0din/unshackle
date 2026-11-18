@@ -586,13 +586,39 @@ def _authenticated_session(monkeypatch, local_cdm):
     svc.service_tag, svc.title_id, svc.log = "EXAMPLE", "t1", logging.getLogger("test")
     svc._server_cdm, svc._server_accounts, svc._service_params, svc._client_config = None, {"global": True}, {}, None
     svc._cdm_sessions, svc._cdm_lock, svc._cdm_requests = {}, threading.Lock(), 0
-    svc._cdm_stop = threading.Event()
+    svc._cdm_stop, svc._cdm_poller = threading.Event(), None
     svc.auth_approval, svc._input_bridge, svc._session = None, None, SimpleNamespace(proxies={})
     svc.drain_server_logs = lambda: None
     svc.start_keepalive = lambda: None
     svc.close = lambda: None
     monkeypatch.setattr(handlers.config, "cdm", {})
     return svc, session
+
+
+class _FakeLive:
+    def __init__(self, renderable, **kwargs):
+        self.running = False
+
+    def start(self):
+        self.running = True
+
+    def update(self, renderable, refresh=False):
+        pass
+
+    def stop(self):
+        self.running = False
+
+
+@pytest.fixture
+def terminal_console(monkeypatch):
+    from unshackle.core import console as console_module
+
+    monkeypatch.setattr(console_module, "console", SimpleNamespace(is_terminal=True))
+    monkeypatch.setattr(console_module, "SyncLive", _FakeLive)
+    monkeypatch.setattr(console_module, "_approval_handler", None)
+    monkeypatch.setattr(console_module, "_approval_live", None)
+    monkeypatch.setattr(console_module, "_approval_renderables", {})
+    return console_module
 
 
 def _request_thread(svc, session):
@@ -626,6 +652,29 @@ def test_a_session_without_a_local_cdm_shows_a_post_login_approval_during_a_requ
     _wait_for(lambda: shown[-1:] == [None])
 
     assert shown == [ApprovalNotice("Approve this device again"), None]
+
+
+def test_a_delayed_prompt_response_does_not_clear_the_next_requests_approval_notice(monkeypatch, terminal_console):
+    import threading
+
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    svc.authenticate()
+
+    first, first_gate = _request_thread(svc, session)
+    assert session.first_prompt_in_flight.wait(5)
+    first_gate.set()
+    first.join(5)
+
+    second, second_gate = _request_thread(svc, session)
+    time.sleep(0.7)  # long enough for the next request's own poller to poll and show the notice
+    session.release_first_prompt.set()
+    _wait_for(lambda: session.prompt_gets >= 2 and terminal_console._approval_renderables)
+    second_gate.set()
+    second.join(5)
+    _wait_for(lambda: not [t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"])
+
+    assert terminal_console._approval_renderables == {}
+    assert terminal_console._approval_live is None
 
 
 async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):

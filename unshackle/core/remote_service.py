@@ -1147,6 +1147,7 @@ class RemoteService:
         self._cdm_lock = Lock()
         self._cdm_requests = 0
         self._cdm_stop = Event()
+        self._cdm_poller: Optional[Thread] = None
         self.apply_service_config(svc_config)
 
     def apply_service_config(self, svc_config: dict) -> None:
@@ -1802,9 +1803,13 @@ class RemoteService:
             self._cdm_requests += 1
             if self._cdm_requests == 1:
                 self._cdm_stop = Event()
-                Thread(
-                    target=self.poll_cdm_calls, args=(self._cdm_stop,), name=f"{self.service_tag}-cdm", daemon=True
-                ).start()
+                self._cdm_poller = Thread(
+                    target=self.poll_cdm_calls,
+                    args=(self._cdm_stop, 0.5, self._cdm_poller),
+                    name=f"{self.service_tag}-cdm",
+                    daemon=True,
+                )
+                self._cdm_poller.start()
         try:
             yield
         finally:
@@ -1813,7 +1818,11 @@ class RemoteService:
                 if self._cdm_requests == 0:
                     self._cdm_stop.set()
 
-    def poll_cdm_calls(self, stop: Event, interval: float = 0.5) -> None:
+    def poll_cdm_calls(self, stop: Event, interval: float = 0.5, after: Optional[Thread] = None) -> None:
+        # The previous poller can still be inside its last prompt GET. It shows and clears the notice on its
+        # own thread, so this one starts only once it is done, or its cleanup would erase the notice shown here.
+        if after is not None:
+            after.join()
         url = f"{self.client.server_url}/api/session/{self._session_id}/prompt"
         sessions: Dict[str, bytes] = {}
         while not stop.wait(interval):
