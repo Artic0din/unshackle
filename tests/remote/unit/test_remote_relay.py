@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 import time
 from types import SimpleNamespace
 
@@ -759,6 +760,71 @@ def test_a_predecessors_second_prompt_response_does_not_clear_an_approval_the_ne
     second_gate.set()
     second.join(5)
     _wait_for(lambda: bridge.get_pending_approval() is None)
+
+
+def test_a_predecessors_cleanup_does_not_clear_the_next_pollers_approval_in_a_download_worker(monkeypatch):
+    import os
+    import threading
+
+    from unshackle.core.api import download_worker
+    from unshackle.core.console import set_approval_handler, set_authentication_handler, set_prompt_handler
+
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(fileno=lambda: read_fd))
+    updates = []
+    approval = {"approval": {"message": "Approve this device again"}}
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    session.held_get = 2
+    download_worker.relay_prompts(updates.append)
+    try:
+        svc.authenticate()
+
+        first, first_gate = _request_thread(svc, session)
+        assert session.first_prompt_in_flight.wait(5)
+        assert updates == [approval]
+        first_gate.set()
+        first.join(5)
+
+        second, second_gate = _request_thread(svc, session)
+        _wait_for(lambda: session.prompt_gets >= 3)
+        session.release_first_prompt.set()
+        _wait_for(lambda: len([t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"]) == 1)
+
+        assert {"approval": None} not in updates
+        second_gate.set()
+        second.join(5)
+        _wait_for(lambda: updates[-1] == {"approval": None})
+    finally:
+        set_prompt_handler(None)
+        set_approval_handler(None)
+        set_authentication_handler(None)
+        os.close(write_fd)
+
+
+def test_a_handlers_approval_is_cleared_only_by_the_poller_that_last_saw_it_and_set_again_after(monkeypatch):
+    from unshackle.core.console import set_approval_handler
+
+    updates = []
+    set_approval_handler(updates.append)
+    try:
+        svc, _ = _authenticated_session(monkeypatch, local_cdm=None)
+        old, new = object(), object()
+        notice = {"message": "Approve this device again"}
+
+        shown = svc.relay_approval(notice, None, old)
+        svc.relay_approval(notice, None, new)
+        svc.relay_approval(None, shown, old)
+        assert updates == [ApprovalNotice("Approve this device again")]
+
+        svc.relay_approval(None, shown, new)
+        svc.relay_approval(notice, None, old)
+        assert updates == [
+            ApprovalNotice("Approve this device again"),
+            None,
+            ApprovalNotice("Approve this device again"),
+        ]
+    finally:
+        set_approval_handler(None)
 
 
 def test_a_session_without_a_local_cdm_leaves_the_prompt_endpoint_alone_while_nothing_is_pending(monkeypatch):

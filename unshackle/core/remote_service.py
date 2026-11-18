@@ -45,7 +45,14 @@ from unshackle.core.authentication import (
     AuthenticationState,
 )
 from unshackle.core.config import config
-from unshackle.core.console import SyncLive, console, prompt_user, publish_authentication, show_approval
+from unshackle.core.console import (
+    SyncLive,
+    approval_handler_active,
+    console,
+    prompt_user,
+    publish_authentication,
+    show_approval,
+)
 from unshackle.core.constants import AnyTrack
 from unshackle.core.credential import Credential
 from unshackle.core.drm import BlowfishStripe, cbcs, real_kids
@@ -1072,8 +1079,10 @@ class RemoteService:
     ANIME: bool = False
     DAILY: bool = False
     server_cdm_type: str = "widevine"
-    # the poller or login that set the bridge's current approval, and so the only one that clears it
+    # the poller or login that set the shared approval, and so the only one that clears it
     _approval_owner: Optional[object] = None
+    # what this service last passed to an approval handler, which cannot be read back like a bridge
+    _approval_sent: Optional[ApprovalNotice] = None
 
     def __init__(
         self,
@@ -1712,26 +1721,31 @@ class RemoteService:
         """Show the server's pending device approval, or clear it, on this login's owning session or job.
 
         ``shown`` is what ``owner`` last showed, and the return value is what it shows now. A terminal shows
-        per thread, so a caller clears only its own notice. A session's bridge holds one notice for every
-        caller, so only the caller that last saw it pending clears it, and a later caller re-sets a notice that
-        was cleared.
+        per thread, so a caller clears only its own notice. A session's bridge and a download worker's handler
+        hold one notice for every caller, so only the caller that last saw it pending clears it, and a later
+        caller re-sets a notice that was cleared.
         """
         try:
             approval = ApprovalNotice.from_dict(raw_approval) if raw_approval is not None else None
         except (TypeError, ValueError):
             raise RemoteError("Remote auth returned an invalid approval payload", "AUTH") from None
         bridge = self._input_bridge
-        if bridge is None:
+        if bridge is None and not approval_handler_active():
             if approval != shown:
                 show_approval(approval)
-        elif approval is not None:
+            return approval
+        # A bridge, or a download worker's handler, holds one notice for every caller.
+        pending = bridge.get_pending_approval() if bridge is not None else self._approval_sent
+        publish = bridge.set_approval if bridge is not None else show_approval
+        if approval is not None:
             # Take ownership even when the notice is already up: a predecessor's last GET can still clear it.
-            if bridge.get_pending_approval() != approval:
-                bridge.set_approval(approval)
+            if pending != approval:
+                publish(approval)
+                self._approval_sent = approval
             self._approval_owner = owner
         elif self._approval_owner is owner:
-            bridge.set_approval(None)
-            self._approval_owner = None
+            publish(None)
+            self._approval_sent = self._approval_owner = None
         return approval
 
     def poll_auth(self, deadline: float, poll_interval: float) -> None:
