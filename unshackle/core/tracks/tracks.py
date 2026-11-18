@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
 import threading
 import time
 from functools import partial
+from itertools import product
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence, Union
 
@@ -59,19 +61,120 @@ def at_resolution(video: Video, res: int) -> bool:
     )
 
 
-def file_track_ids(path: Path) -> dict[str, int]:
-    """Return the mkvmerge ID of the first track of each type in a file. A TS file can hold its audio first."""
+def video_rank(video: Video) -> tuple[int, bool, float, int]:
+    """The quality key of a video, highest first when sorted in reverse: standard resolution, 2D, bitrate, height."""
+    return (
+        standard_resolution(video.width, video.height) or 0,
+        not video.stereo,
+        float(video.bitrate or 0.0),
+        video.height or 0,
+    )
+
+
+def pick_video(candidates: list[Video], worst: bool) -> Optional[Video]:
+    """The best candidate by ``video_rank``, or with ``worst`` the lowest bitrate of the lowest resolution.
+
+    ``worst`` prefers 2D and counts a track with no bitrate or no size as the highest. A full tie goes to the
+    earlier track, or with ``worst`` to the later one.
+    """
+    if worst:
+        return min(
+            reversed(candidates),
+            key=lambda v: (v.stereo, standard_resolution(v.width, v.height) or math.inf, v.bitrate or math.inf),
+            default=None,
+        )
+    return max(candidates, key=video_rank, default=None)
+
+
+def video_language_groups(videos: list[Video], requests: Optional[list[str]], exact: bool) -> list[Optional[set[str]]]:
+    """The tag sets to pick one video from each: one per request, or one per tag when ``requests`` is None.
+
+    A request that matches several regional tags (en-AU, en-GB) is one set, so it gives one video. With no
+    requests, the whole pool is one group, given as None.
+    """
+    if requests is None:
+        return [{tag} for tag in dict.fromkeys(str(v.language) for v in videos)]
+    tags = [v.language for v in videos]
+    return [matching_languages(request, tags, exact) for request in requests] or [None]
+
+
+def select_videos(
+    pool: list[Video],
+    qualities: Sequence[int],
+    ranges: Sequence[Video.Range],
+    codecs: Sequence[Video.Codec],
+    requests: Optional[list[str]],
+    exact: bool,
+    worst: bool,
+) -> list[Video]:
+    """One ``pick_video`` pick for each quality, range, codec and language group of the pool, without repeats.
+
+    An empty quality, range or codec list puts no limit on that field. The groups come from ``video_language_groups``.
+    """
+    selected: list[Video] = []
+    for res, range_, codec, group in product(
+        qualities or (None,), ranges or (None,), codecs or (None,), video_language_groups(pool, requests, exact)
+    ):
+        match = pick_video(
+            [
+                v
+                for v in pool
+                if (not res or at_resolution(v, res))
+                and (not range_ or v.range == range_)
+                and (not codec or v.codec == codec)
+                and (group is None or str(v.language) in group)
+            ],
+            worst,
+        )
+        if match and match not in selected:
+            selected.append(match)
+    return selected
+
+
+def mkvmerge_tracks(path: Path) -> list[dict[str, Any]]:
+    """The tracks ``mkvmerge -J`` reports for a file, empty when it reads none."""
     res = subprocess.run(
         [str(binaries.MKVToolNix), "-J", str(path)], capture_output=True, text=True, encoding="utf-8", errors="replace"
     )
+    return json.loads(res.stdout or "{}").get("tracks") or []
+
+
+def file_track_ids(path: Path) -> dict[str, int]:
+    """Return the mkvmerge ID of the first track of each type in a file. A TS file can hold its audio first."""
     ids: dict[str, int] = {}
-    for track in json.loads(res.stdout or "{}").get("tracks") or []:
+    for track in mkvmerge_tracks(path):
         ids.setdefault(track["type"], track["id"])
     if not ids:
         logging.getLogger("Tracks").debug(
             f"mkvmerge found no tracks in {path.name}, so it is addressed as video 0, audio 1"
         )
     return ids or {"video": 0, "audio": 1}
+
+
+def remux_vvc(source: Path) -> Path:
+    """Remux an H.266 file to a temp Matroska file with FFmpeg, the one input mkvmerge keeps as VVC.
+
+    mkvmerge stores VVC from an MP4 as V_QUICKTIME, and FFmpeg before 8.0 writes another codec ID. Both exit 0
+    with video no player decodes, so the codec ID FFmpeg wrote is checked.
+    """
+    if not binaries.FFMPEG:
+        raise EnvironmentError('FFmpeg executable "ffmpeg" was not found but is required to mux H.266.')
+    output = config.directories.temp / f"vvcmux_{source.stem}_{os.getpid()}_{threading.get_ident()}.mkv"
+    cmd: list[Union[str, Path]] = [binaries.FFMPEG, "-nostdin", "-y", "-i", source, "-map", "0:v", "-map", "0:a?"]
+    cmd += ["-map_metadata", "-1", "-fflags", "+bitexact", "-c", "copy", output]
+    run_step(
+        cmd,
+        status="Remuxing H.266 for mkvmerge...",
+        output=output,
+        label="ffmpeg H.266 remux",
+    )
+    codec = next(
+        (t.get("properties", {}).get("codec_id") for t in mkvmerge_tracks(output) if t["type"] == "video"), None
+    )
+    if codec != "V_MPEGI/ISO/VVC":
+        output.unlink(missing_ok=True)
+        raise RuntimeError(f"FFmpeg wrote H.266 as {codec}, muxing H.266 needs FFmpeg 8.0 or later")
+    return output
 
 
 def mp4_track_count(moov: Optional[bytes]) -> int:
@@ -361,15 +464,7 @@ class Tracks:
         """
         if not self.videos:
             return
-        self.videos.sort(
-            key=lambda x: (
-                standard_resolution(x.width, x.height) or 0,
-                not x.stereo,
-                float(x.bitrate or 0.0),
-                x.height or 0,
-            ),
-            reverse=True,
-        )
+        self.videos.sort(key=video_rank, reverse=True)
         for language in reversed(by_language or []):
             if str(language) in ("all", "best"):
                 language = self._original_language(self.videos, exact_match)
@@ -527,13 +622,14 @@ class Tracks:
 
     @staticmethod
     def flag_hybrid_ingredients(hybrid_selected: list[Video], non_hybrid_selected: list[Video]) -> None:
-        """Mark tracks selected only as hybrid ingredients so the standalone mux loop skips them.
+        """Mark every hybrid ingredient, and the ingredient-only ones that the standalone mux loop skips.
 
         A track that the caller also selected as an explicit deliverable (same track in both
         selections) stays unflagged, and the standalone mux loop muxes it alongside the hybrid.
         A ``native_hybrid`` track is the hybrid itself, so it stays unflagged too.
         """
         for video in hybrid_selected:
+            video.hybrid_ingredient = True
             if video not in non_hybrid_selected and not video.native_hybrid:
                 video.hybrid_base_only = True
 
@@ -544,15 +640,15 @@ class Tracks:
 
         A track that already carries DV and an HDR10 or HDR10+ base (DV+HDR10P, HDR10+DV, HDR10P+DV) is a finished
         hybrid, so its resolution takes that track and no base. One that carries HDR10+ comes first. The other
-        resolutions get a base only when a DV track can give it an RPU, or with ``generate_dv``.
+        resolutions get a base only when a DV track can give it an RPU, or with ``generate_dv``. Each pick follows
+        ``pick_video``, and the DV track is the lowest one, the best of that height.
         """
-        pick = min if worst else max
         natives = {}
         for res in quality:
             candidates = [v for v in tracks if v.finished_hybrid and at_resolution(v, res)]
             if candidates:
                 with_hdr10plus = [v for v in candidates if v.carries_hdr10plus]
-                natives[res] = pick(with_hdr10plus or candidates, key=lambda v: v.bitrate or 0)
+                natives[res] = pick_video(with_hdr10plus or candidates, worst)
         for video in tracks:
             video.native_hybrid = any(video is v for v in natives.values())
         dv_tracks = [v for v in tracks if v.range == Video.Range.DV]
@@ -578,14 +674,14 @@ class Tracks:
 
         base_selected = []
         for res in quality:
-            candidates = [v for v in base_tracks if at_resolution(v, res)]
-            if candidates:
-                chosen = pick(candidates, key=lambda v: v.bitrate or 0)
+            chosen = pick_video([v for v in base_tracks if at_resolution(v, res)], worst)
+            if chosen:
                 base_selected.append(chosen)
 
-        lowest_dv = (
-            min(dv_tracks, key=lambda v: v.height or 0) if dv_tracks and (base_selected or not natives) else None
-        )
+        lowest_dv = None
+        if dv_tracks and (base_selected or not natives):
+            lowest_height = min(v.height or 0 for v in dv_tracks)
+            lowest_dv = pick_video([v for v in dv_tracks if (v.height or 0) == lowest_height], worst=False)
 
         def select(x: Video) -> bool:
             if x in base_selected or x.native_hybrid:
@@ -728,7 +824,7 @@ class Tracks:
 
             delay = round((track.sample_start - sample_base) * 1000) if config.sample else 0
             moov = read_top_level_box(source, b"moov")
-            flags = "" if moov else ":tkhd=enable,movie,preview"
+            flags = "" if moov else ":tkhd=enable,movie,preview:ID=-1"
             cl.extend(["-add", f"{source}:lang={track.mux_language}{flags}" + (f":delay={delay}" if delay else "")])
             name = "" if isinstance(track, Video) else (track.get_track_name() or "")
             if name:
@@ -964,6 +1060,7 @@ class Tracks:
             )
         )
 
+        remuxed: list[Path] = []
         for i, vt in enumerate(self.videos):
             if not vt.path or not vt.path.exists():
                 raise ValueError("Video Track must be downloaded before muxing...")
@@ -978,7 +1075,12 @@ class Tracks:
             else:
                 is_default = i == 0
 
-            ids = file_track_ids(vt.path)
+            source = vt.path
+            if vt.codec == Video.Codec.VVC and source.suffix.lower() != ".mkv":
+                source = remux_vvc(source)
+                remuxed.append(source)
+
+            ids = file_track_ids(source)
             v = ids.get("video", 0)
             video_args = [
                 "--language",
@@ -1026,7 +1128,7 @@ class Tracks:
                     ]
                 )
 
-            cl.extend(video_args + ["(", str(vt.path), ")"])
+            cl.extend(video_args + ["(", str(source), ")"])
 
         for i, at in enumerate(self.audio):
             if not at.path or not at.path.exists():
@@ -1217,6 +1319,8 @@ class Tracks:
         finally:
             if chapters_path:
                 chapters_path.unlink()
+            for path in remuxed:
+                path.unlink(missing_ok=True)
             if delete:
                 for track in self:
                     track.delete()

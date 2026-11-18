@@ -29,8 +29,11 @@ class Cacher:
         version: Optional[int] = 1,
         data: Optional[Any] = None,
         expiration: Optional[datetime] = None,
+        route: Optional[tuple[tuple[str, ...], str]] = None,
     ) -> None:
+        """``route`` is ``(prefixes, tag)``: a cache key that starts with one of ``prefixes`` lives under ``tag``."""
         self.service_tag = service_tag
+        self.route = route
         self.key = key
         self.version = version
         self.data: Any = data or {}
@@ -64,7 +67,8 @@ class Cacher:
         :param version: the config data version you expect to use.
         :returns: Cache object containing the cached data or None if the file does not exist.
         """
-        cache = Cacher(self.service_tag, key, version)
+        tag = self.route[1] if self.route and key.startswith(self.route[0]) else self.service_tag
+        cache = Cacher(tag, key, version, route=self.route)
         if cache.path.is_file():
             data = jsonpickle.loads(cache.path.read_text(encoding="utf8"))
             payload = data.copy()
