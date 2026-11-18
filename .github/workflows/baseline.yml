@@ -1,0 +1,22 @@
+name: Repository Baseline
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  shared:
+    name: Shared baseline
+    uses: Artic0din/devkit/.github/workflows/baseline.yml@1131378c986f0efdc35779acce8e431a8e9cd946  # DevKit #97
+    with:
+      required-files: README.md, LICENSE, .gitignore, CHANGELOG.md
