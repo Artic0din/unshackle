@@ -557,6 +557,7 @@ class _ScriptedSession:
 
         self.approval = approval
         self.prompt_gets = 0
+        self.held_get = 1
         self.cdm_call = None
         self.answers = []
         self.first_prompt_in_flight = threading.Event()
@@ -571,7 +572,7 @@ class _ScriptedSession:
     def get(self, url, timeout, json=None):
         if url.endswith("/prompt"):
             self.prompt_gets += 1
-            if self.prompt_gets == 1:
+            if self.prompt_gets == self.held_get:
                 self.first_prompt_in_flight.set()
                 assert self.release_first_prompt.wait(5)
             if self.cdm_call is not None and self.prompt_gets > 1:
@@ -724,6 +725,33 @@ def test_a_delayed_prompt_response_does_not_clear_the_next_requests_headless_app
 
     second, second_gate = _request_thread(svc, session)
     _wait_for(lambda: bridge.get_pending_approval() is not None)
+    session.release_first_prompt.set()
+    _wait_for(lambda: len([t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"]) == 1)
+
+    assert bridge.get_pending_approval() == ApprovalNotice("Approve this device again")
+    second_gate.set()
+    second.join(5)
+    _wait_for(lambda: bridge.get_pending_approval() is None)
+
+
+def test_a_predecessors_second_prompt_response_does_not_clear_an_approval_the_next_poller_already_fetched(monkeypatch):
+    import threading
+
+    from unshackle.core.api.input_bridge import InputBridge
+
+    svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    session.held_get = 2
+    svc._input_bridge = bridge = InputBridge()
+    svc.authenticate()
+
+    first, first_gate = _request_thread(svc, session)
+    assert session.first_prompt_in_flight.wait(5)
+    assert bridge.get_pending_approval() == ApprovalNotice("Approve this device again")
+    first_gate.set()
+    first.join(5)
+
+    second, second_gate = _request_thread(svc, session)
+    _wait_for(lambda: session.prompt_gets >= 3)
     session.release_first_prompt.set()
     _wait_for(lambda: len([t for t in threading.enumerate() if t.name == "EXAMPLE-cdm"]) == 1)
 

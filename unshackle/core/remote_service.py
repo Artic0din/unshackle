@@ -1713,7 +1713,8 @@ class RemoteService:
 
         ``shown`` is what ``owner`` last showed, and the return value is what it shows now. A terminal shows
         per thread, so a caller clears only its own notice. A session's bridge holds one notice for every
-        caller, so only the caller that set it clears it, and a later caller re-sets a notice that was cleared.
+        caller, so only the caller that last saw it pending clears it, and a later caller re-sets a notice that
+        was cleared.
         """
         try:
             approval = ApprovalNotice.from_dict(raw_approval) if raw_approval is not None else None
@@ -1724,9 +1725,10 @@ class RemoteService:
             if approval != shown:
                 show_approval(approval)
         elif approval is not None:
+            # Take ownership even when the notice is already up: a predecessor's last GET can still clear it.
             if bridge.get_pending_approval() != approval:
                 bridge.set_approval(approval)
-                self._approval_owner = owner
+            self._approval_owner = owner
         elif self._approval_owner is owner:
             bridge.set_approval(None)
             self._approval_owner = None
