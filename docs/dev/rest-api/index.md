@@ -161,7 +161,7 @@ request and response in full.
 | `POST` | `/api/search` | Run a service's search for a query. |
 | `POST` | `/api/list-titles` | List the titles behind a service title ID. |
 | `POST` | `/api/list-tracks` | List the video, audio, and subtitle tracks for a title. |
-| `GET` | `/api/remote/logins` | The caller's `remote_services` logins in progress, with their prompt, approval and authentication state. |
+| `GET` | `/api/remote/logins` | The caller's `remote_services` logins in progress for `list-titles` and `list-tracks`, with their prompt, approval and authentication state. |
 | `POST` | `/api/remote/logins/{login_id}/input` | Answer the prompt that a remote login waits on. |
 
 ### Downloads and jobs

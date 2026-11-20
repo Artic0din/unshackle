@@ -397,12 +397,25 @@ Every track carries the same fields as a local track: `is_original_lang`, `name`
 
 ### `GET /api/remote/logins`
 
-List the caller's `search`, `list-titles` and `list-tracks` calls that wait on the login of one of the server's `remote_services` servers. Poll it alongside such a call to show the user what the login needs. An admin key sees every caller's logins.
+List the caller's `list-titles` and `list-tracks` calls that wait on the login of one of the server's `remote_services` servers. Poll it alongside such a call to show the user what the login needs. A remote `search` does not appear here. An admin key sees every caller's logins.
 
-Each entry has the remote `server`, `service`, `title_id`, and:
+=== "Response `200`"
+
+    ```json
+    {
+      "logins": [
+        { "id": "3f2c...", "remote": "my-server", "service": "EXAMPLE", "title_id": "12345",
+          "prompt": "Enter the code sent to your email:", "approval": null,
+          "authentication": { "state": "waiting", "method": "credentials" } }
+      ]
+    }
+    ```
 
 | Field | Type | Meaning |
 | --- | --- | --- |
+| `id` | string | The `{login_id}` for the input route. |
+| `remote` | string | The name of the `remote_services` server the login runs on. |
+| `service`, `title_id` | string | The service and title of the call that waits. |
 | `prompt` | string or `null` | What the login asks the user (an OTP, a PIN). Answer it with `POST /api/remote/logins/{login_id}/input`. |
 | `approval` | object or `null` | `{"message": "..."}` while the login waits for an approval on another device, such as a pair code. It needs no answer. The object is transient: show it, but never write it to a log or a history. |
 | `authentication` | object or `null` | The login's redacted authentication state. See [Authentication state](job-lifecycle.md#authentication-state). |
@@ -779,7 +792,8 @@ answer here.
 A job that waits for an approval on another device, such as a pair code login, shows the
 message in its `approval` field instead, as `{"message": "..."}`. An approval needs no answer:
 show it to the user and keep polling. The object is transient: it clears when the wait ends, the
-job history and the dashboard never get it, and a client must not log or store it. The job's
+job history and the dashboard never get it, and a client must not log or store it. Any other
+message the service shows without asking for an answer is in `notice`. The job's
 `authentication` field reports the login's
 [authentication state](job-lifecycle.md#authentication-state).
 

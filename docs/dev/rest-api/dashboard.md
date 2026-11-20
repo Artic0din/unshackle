@@ -76,7 +76,7 @@ those it sends:
 |-------|------|
 | `log` | One log record: `seq`, `ts`, `level`, `logger`, `msg`. |
 | `session` | `action` (`create`, `update` on every request the session makes and when titles or tracks load, or `delete`) plus the remote session summary. The `update` for a request carries that request as `action_entry` and has no `actions`: append it to the log you hold, capped at 500. Every other event is a complete snapshot with `actions`. A `delete` also carries `reason`: `closed` (the client ended it), `expired` (TTL sweep) or `evicted` (`max_sessions` reached). A session opened by `--skip-dl` can live only a few seconds, so a UI that wants history must keep its own record of these events. |
-| `job` | `event` (`queued`, `progress`, `status`, or the terminal status) plus the full job object, without `approval` and `authentication`. |
+| `job` | `event` (`queued`, `progress`, `status`, or the terminal status) plus the full job object. Only the `queued` event carries `approval` and `authentication`, and both are `null` then. |
 | `service` | `action` (`staged`, `applied` or `failed`) and `tags`, the services it applies to. A `failed` action carries `errors` and an empty `tags`. Refetch `/api/dashboard/services` when one arrives, instead of polling for a reload. |
 
 Every frame carries an `id:` (the event seq). After a dropped connection an `EventSource`

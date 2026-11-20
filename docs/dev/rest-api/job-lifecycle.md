@@ -164,6 +164,7 @@ full detail:
 | `skipped_subtitles` | list | Subtitles that were skipped as non-fatal failures (when `skip_subtitle_errors` is set). |
 | `skipped_titles` | list | Titles that the run skipped because a requested track or language is missing, each `{title, reason}`. |
 | `input_prompt` | string or `null` | The prompt the service waits on. Answer it with `POST /api/download/jobs/{job_id}/input`. |
+| `notice` | string or `null` | A message the service shows that needs no answer. |
 | `approval` | object or `null` | `{"message": "..."}` while the service waits for an approval on another device, such as a pair code. It needs no answer. Transient: only the job's owner sees it, it clears when the wait ends, and the job history, the dashboard and the event replay never get it. |
 | `authentication` | object or `null` | The job's redacted [authentication state](#authentication-state). Only the job's owner sees it; the dashboard does not. |
 
@@ -216,7 +217,11 @@ secret.
 | `next_method` | a method | Only with `fallback`: the method the service tries after `method` failed. |
 | `failure` | `authentication_rejected`, `entitlement`, `region`, `concurrency`, `network`, `manifest`, `drm`, `licence`, `application` | With `error` and `fallback`: the class of the failure. |
 
-The job history keeps only a final state.
+When a job finishes while its `authentication` is not in a final state, the manager replaces it
+with one that follows from the job's result: `authenticated` for a completed job, `cancelled` for
+a cancelled one, and `error` for a failed one, with `failure` set to `authentication_rejected`
+when the session had expired or was rejected, else `application`. The job history keeps only a
+final state.
 
 ## Terminal states in detail
 
