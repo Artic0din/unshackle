@@ -44,7 +44,7 @@ In a clone, run every command as `uv run unshackle ...`.
 
 External tools. (recommended versions):
 
-- [Python](https://www.python.org/) - 3.11 - 3.14
+- [Python](https://www.python.org/) - 3.11.5 - 3.14
 - [uv](https://docs.astral.sh/uv/) - ≥ 0.5
 - [FFmpeg](https://ffmpeg.org/) - ≥ 6.0
 - [MKVToolNix](https://mkvtoolnix.download/) - ≥ 80
