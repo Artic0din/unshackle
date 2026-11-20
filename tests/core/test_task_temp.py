@@ -169,6 +169,16 @@ def test_clear_directory_removes_stale_task_dir(temp_root: Path) -> None:
     files_count, freed_bytes = clear_directory(temp_root)
     assert not task_dir.exists()
     assert temp_root.is_dir()
-    # glob("**/*") never matches dotfiles, so .lock is not counted
+    # the task's .lock is bookkeeping, not a temp file, so it is not counted
     assert files_count == 1
     assert freed_bytes == 5
+
+
+def test_clear_directory_counts_lock_outside_task_dir(temp_root: Path) -> None:
+    cache_dir = temp_root / "cache"
+    cache_dir.mkdir()
+    (cache_dir / LOCK_NAME).write_bytes(b"12")
+    files_count, freed_bytes = clear_directory(temp_root)
+    assert not cache_dir.exists()
+    assert files_count == 1
+    assert freed_bytes == 2
