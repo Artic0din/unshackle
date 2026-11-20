@@ -164,7 +164,8 @@ full detail:
 | `skipped_subtitles` | list | Subtitles that were skipped as non-fatal failures (when `skip_subtitle_errors` is set). |
 | `skipped_titles` | list | Titles that the run skipped because a requested track or language is missing, each `{title, reason}`. |
 | `input_prompt` | string or `null` | The prompt the service waits on. Answer it with `POST /api/download/jobs/{job_id}/input`. |
-| `notice` | string or `null` | A message the service shows while it waits for an approval on another device, such as a pair code. It needs no answer. |
+| `approval` | object or `null` | `{"message": "..."}` while the service waits for an approval on another device, such as a pair code. It needs no answer. Transient: only the job's owner sees it, it clears when the wait ends, and the job history, the dashboard and the event replay never get it. |
+| `authentication` | object or `null` | The job's redacted [authentication state](#authentication-state). Only the job's owner sees it; the dashboard does not. |
 
 The full detail adds `started_time`, `completed_time`, `output_files`, the redacted
 `parameters`, and, for failed jobs, `error_message`, `error_details`, and `error_code`.
@@ -199,6 +200,23 @@ With `--debug-api`, it also adds `error_traceback` and `worker_stderr`.
     episode alone. The top-level bar therefore tracks the *current* episode, not the
     batch as a whole. To derive true overall completion, compare the growing
     `output_files` array against `parameters.wanted` rather than trusting `progress`.
+
+### Authentication state
+
+A job's `authentication` field, the `authentication` of a remote login, and the `authentication`
+of a remote session's prompt response hold the same object: the last authentication state the
+service reported. It has no free text, so it never carries a provider's error message, a code or a
+secret.
+
+| Field | Values | Meaning |
+|---|---|---|
+| `state` | `ready`, `session_present`, `session_expired`, `session_rejected`, `renewing`, `repairing`, `fallback`, `waiting`, `authenticated`, `timed_out`, `cancelled`, `error` | Where the login is. `authenticated`, `timed_out`, `cancelled` and `error` are final. |
+| `method` | `cookies`, `credentials`, `pairing` | The method in use. |
+| `available_methods` | list of methods | Only with `ready`: the methods the service can use. |
+| `next_method` | a method | Only with `fallback`: the method the service tries after `method` failed. |
+| `failure` | `authentication_rejected`, `entitlement`, `region`, `concurrency`, `network`, `manifest`, `drm`, `licence`, `application` | With `error` and `fallback`: the class of the failure. |
+
+The job history keeps only a final state.
 
 ## Terminal states in detail
 
@@ -371,7 +389,8 @@ The job worker has no terminal. When a service asks the user for input, the job 
 the prompt to `progress.json` as `input_prompt` and waits. The answer from
 `POST /api/download/jobs/{job_id}/input` goes to the job worker on its stdin.
 When a service waits for an approval on another device, the job worker writes the message as
-`notice` and sets it back to `null` when the wait ends.
+`approval` and sets it back to `null` when the wait ends. The approval never goes to the job's
+log output. The job worker also writes the service's authentication state as `authentication`.
 
 Running each download out-of-process isolates the server from crashes, memory growth,
 and blocking work inside the download engine, and makes hard cancellation (killing the

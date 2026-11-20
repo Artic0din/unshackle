@@ -161,6 +161,8 @@ request and response in full.
 | `POST` | `/api/search` | Run a service's search for a query. |
 | `POST` | `/api/list-titles` | List the titles behind a service title ID. |
 | `POST` | `/api/list-tracks` | List the video, audio, and subtitle tracks for a title. |
+| `GET` | `/api/remote/logins` | The caller's `remote_services` logins in progress, with their prompt, approval and authentication state. |
+| `POST` | `/api/remote/logins/{login_id}/input` | Answer the prompt that a remote login waits on. |
 
 ### Downloads and jobs
 
@@ -194,6 +196,14 @@ request and response in full.
 | `POST` | `/api/maintenance/clear-temp` | Clear the temp directory. |
 | `POST` | `/api/maintenance/refresh-services` | `git pull` each configured service repository and re-import the services that changed. |
 
+### CDM devices
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/cdm/devices` | Describe every Widevine and PlayReady device file on the server. |
+| `POST` | `/api/cdm/devices/test` | Request a license from the DRM vendor's test server with one device. |
+| `POST` | `/api/cdm/devices/reprovision` | Give a PlayReady device a new leaf certificate and keys from its group key. |
+
 ### Remote-download sessions
 
 | Method | Path | Purpose |
@@ -209,7 +219,7 @@ request and response in full.
 | `POST` | `/api/session/{session_id}/license` | Proxy or server-side DRM licensing. |
 | `POST` | `/api/session/{session_id}/keys/bad` | Report a server-vault content key that did not decrypt. |
 | `GET` | `/api/session/{session_id}/logs` | Drain the service's server-side log output. |
-| `GET` | `/api/session/{session_id}/prompt` | Poll for interactive auth status/prompt. |
+| `GET` | `/api/session/{session_id}/prompt` | Poll for interactive auth status, prompt, device approval and authentication state. |
 | `POST` | `/api/session/{session_id}/prompt` | Submit an answer to an auth prompt. |
 
 !!! note "Remote-only routes"
