@@ -14,7 +14,7 @@ from unshackle.core.config import POSSIBLE_CONFIG_PATHS, config, config_path
 from unshackle.core.console import console, listing_table, print_wide
 from unshackle.core.constants import context_settings
 from unshackle.core.services import Services, load_all
-from unshackle.core.temp import TASK_PREFIX, is_stale
+from unshackle.core.temp import LOCK_NAME, TASK_PREFIX, is_stale
 
 
 def get_dependencies() -> list[dict]:
@@ -170,7 +170,7 @@ def clear_directory(path: Path) -> tuple[int, int]:
                 continue
             if is_real_dir:
                 for child in entry.glob("**/*"):
-                    if child.is_file():
+                    if child.is_file() and child.name != LOCK_NAME:
                         files_count += 1
                         try:
                             freed_bytes += child.stat().st_size
