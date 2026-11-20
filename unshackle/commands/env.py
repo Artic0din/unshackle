@@ -169,8 +169,9 @@ def clear_directory(path: Path) -> tuple[int, int]:
             if is_real_dir and entry.name.startswith(TASK_PREFIX) and not is_stale(entry):
                 continue
             if is_real_dir:
+                task_lock = entry / LOCK_NAME if entry.name.startswith(TASK_PREFIX) else None
                 for child in entry.glob("**/*"):
-                    if child.is_file() and child.name != LOCK_NAME:
+                    if child.is_file() and child != task_lock:
                         files_count += 1
                         try:
                             freed_bytes += child.stat().st_size
