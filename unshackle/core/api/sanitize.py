@@ -56,7 +56,8 @@ def safe_cache_payload(text: str) -> bool:
     """True when a peer-supplied cache file is JSON that jsonpickle decodes to plain data and datetimes only.
 
     ``Cacher`` decodes cache files with jsonpickle, which imports and calls any type a file names,
-    so a file from another machine may name the datetime types and nothing else.
+    so a file from another machine may name the datetime types and nothing else. Nesting deeper than
+    ``MAX_CACHE_PAYLOAD_DEPTH`` is refused, because the jsonpickle decode is recursive.
     """
     try:
         root = json.loads(text)
