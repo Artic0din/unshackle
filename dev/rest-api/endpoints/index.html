@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../../assets/favicon.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.2">
     
     
       
@@ -3562,6 +3562,12 @@ through the <code>wanted</code> parameter.</p>
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>availability</code></td>
+<td>object</td>
+<td>all</td>
+<td>Optional account-scoped metadata: <code>paid</code> is a boolean describing the catalogue offer; <code>access</code> is <code>"granted"</code>, <code>"denied"</code>, or <code>"unknown"</code>. Both fields are optional; missing or unknown access is not denial. Only these allowlisted fields are forwarded, including through remote services.</td>
+</tr>
 <tr>
 <td><code>part</code></td>
 <td>integer</td>
