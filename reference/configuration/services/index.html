@@ -2492,10 +2492,12 @@ later. A <code>tier</code> that names no entry under <code>serve.tiers</code>, o
 positive whole number, stops the server at startup, because the alternative is an API key that
 silently gets no limit. The rate limit never applies to the dashboard key, and never to
 <code>/api/health</code>.</p>
-<p><code>server_accounts</code> lists, per service, the accounts the server lends to remote sessions. A remote
-session for a listed service ignores the credentials, cookies, and cache the client sends and
-uses one of the server's own profiles from <code>credentials</code>. For a service that is not listed the
-server never uses its own accounts: a client that sends nothing authenticates with nothing.</p>
+<p><code>server_accounts</code> lists the accounts the server lends to remote sessions for each service.
+For a listed service, a client with the <code>server_accounts</code> grant uses a server profile and its cache.</p>
+<p>For an unlisted service, a client can open a session without a title by sending <code>{"auth_only": true}</code> to <code>POST /api/session/create</code>.
+In full mode (the default or <code>api_only</code>), this session loads the server's local profile cookies and credentials and uses the persistent cache for that service.
+The calling API key needs the <code>server_accounts</code> grant for the service or the request returns <code>403 FORBIDDEN</code>.
+For an unlisted service, title-bound sessions and all sessions on a <code>--remote-only</code> server use client-isolated credentials, cookies, and cache.</p>
 <div class="language-yaml highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">credentials</span><span class="p">:</span>
 </span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">EXAMPLE1</span><span class="p">:</span>
 </span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">    </span><span class="nt">ca_main</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">user1@example.com:pw1</span>

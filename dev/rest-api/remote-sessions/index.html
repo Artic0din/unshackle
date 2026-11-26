@@ -2998,15 +2998,18 @@ from a browser origin, not when you want only the local HTTP API.</p>
 </tbody>
 </table>
 <h3 id="create-request-and-response">Create: request and response<a class="headerlink" href="#create-request-and-response" title="Permanent link">&para;</a></h3>
-<p><code>POST /api/session/create</code> requires <code>service</code> and <code>title_id</code>. It also accepts
-<code>credentials</code>, <code>cookies</code> (base64 of zlib-compressed Netscape cookie file), <code>proxy</code>,
-<code>no_proxy</code>, <code>profile</code>, <code>cache</code> (a map of <code>filename → base64(zlib(bytes))</code>),
-<code>client_region</code>, <code>server_cdm</code> (<code>false</code> when the user picked the local CDM), <code>cdm_type</code>, <code>cdm_security_level</code>, <code>cdm_relay</code> (<code>true</code> when the client
-answers CDM calls), <code>cdm_system_id</code> and <code>cdm_device_type</code> (Widevine only), <code>service_config</code>
-(the identity config keys the service lists in <code>client_config</code>), <code>client</code> (a freeform identity
-object the dashboard shows as sent), and the track-selection hints <code>range_</code>, <code>vcodec</code>,
-<code>quality</code>, <code>best_available</code>, <code>generate_dv</code>, plus arbitrary service CLI options
-(<code>additionalProperties: true</code>).</p>
+<p><code>POST /api/session/create</code> requires a service and normally a nonblank <code>title_id</code>.
+Send <code>{"service": "EXAMPLE", "auth_only": true}</code> to start a provider login without selecting a title.
+A provider CLI that accepts a title receives <code>AUTH_ONLY_TITLE = ""</code>.
+A CLI without a title parameter receives no title argument.
+The titles and tracks endpoints return HTTP 400 for these sessions.</p>
+<p>A configured server account retains its existing grant and cache rules.
+For a service without a configured server account, a full-mode auth-only login uses the server profile's credentials, cookies and persistent service cache.
+This requires permission to use the server's accounts.
+The server ignores uploaded cache entries for these logins and keeps the cache on session deletion.
+In <code>remote_only</code> mode a client-managed login uses the client's material and a temporary session cache.
+Deleting the session returns the authenticated client's cache and removes the temporary directory.</p>
+<p>The request also accepts <code>credentials</code>, <code>cookies</code> (base64 of zlib-compressed Netscape cookie file), <code>proxy</code>, <code>no_proxy</code>, <code>profile</code>, <code>cache</code> (a map of <code>filename → base64(zlib(bytes))</code>), <code>client_region</code>, <code>server_cdm</code> (<code>false</code> when the user picked the local CDM), <code>cdm_type</code>, <code>cdm_security_level</code>, <code>cdm_relay</code> (<code>true</code> when the client answers CDM calls), <code>cdm_system_id</code> and <code>cdm_device_type</code> (Widevine only), <code>service_config</code> (the identity config keys the service lists in <code>client_config</code>), <code>client</code> (a freeform identity object the dashboard shows as sent), and the track-selection hints <code>range_</code>, <code>vcodec</code>, <code>quality</code>, <code>best_available</code>, <code>generate_dv</code>, plus arbitrary service CLI options (<code>additionalProperties: true</code>).</p>
 <p><code>dl_params</code> holds the <code>dl</code> track selection: <code>lang</code>, <code>v_lang</code>, <code>a_lang</code> and <code>s_lang</code>
 (arrays of language strings), <code>acodec</code> (an array of audio codec names, such as
 <code>EC3</code>), and <code>forced_subs</code> and <code>exact_lang</code> (booleans). The server gives these values to the
@@ -3066,6 +3069,9 @@ layer.</p>
 <li><code>AUTH_INPUT_TIMEOUT = 600.0</code> seconds. This is also the TTL granted to
   <code>AUTHENTICATING</code> / <code>PENDING_INPUT</code> sessions in the store.</li>
 </ul>
+<p>An <code>approval</code> contains a required <code>message</code> and may include an HTTPS <code>url</code>, a user-facing <code>code</code>, and a UTC <code>expires_at</code> timestamp.
+The server clears the notice on completion, timeout, cancellation or failure.
+Approval fields stay out of durable logs, job history and dashboard summaries.</p>
 <p><code>GET /api/session/{id}/prompt</code> returns one of:</p>
 <div class="language-json highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">"status"</span><span class="p">:</span><span class="w"> </span><span class="s2">"authenticated"</span><span class="w"> </span><span class="p">}</span>
 </span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="p">{</span><span class="w"> </span><span class="nt">"status"</span><span class="p">:</span><span class="w"> </span><span class="s2">"authenticated"</span><span class="p">,</span><span class="w"> </span><span class="nt">"approval"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"message"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Open the provider and enter ABCD"</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span>

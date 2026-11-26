@@ -4951,7 +4951,20 @@ Use <code>error_code</code> and <code>retryable</code> to decide what to do.</p>
 <p>A slow response is not gzip-compressed. Gzip output cannot start before the body is ready, and
 the newlines must go out at once.</p>
 <h3 id="post-apisessioncreate"><code>POST /api/session/create</code><a class="headerlink" href="#post-apisessioncreate" title="Permanent link">&para;</a></h3>
-<p>Make a remote session for a service and title. Authentication runs asynchronously in the background. This call returns immediately with <code>status: "authenticating"</code>, and you then poll the prompt endpoint. The body accepts <code>service</code> and <code>title_id</code> (both required). It also accepts a broad set of optional keys, because the body allows <code>additionalProperties</code>. These are <code>credentials</code> (<code>{username, password, extra?}</code>), <code>cookies</code> (base64 of zlib-compressed Netscape cookie file), <code>proxy</code>, <code>no_proxy</code>, <code>profile</code>, <code>cache</code> (map of forwarded cache files, keyed by the file path relative to the service cache directory with <code>/</code> separators and no <code>.json</code> suffix, so a nested key such as <code>session_web/&lt;sha1&gt;</code> lands in a subdirectory), <code>client_region</code>, <code>proxy_region</code>, <code>cdm_type</code>, <code>range_</code>, <code>vcodec</code>, <code>quality</code>, <code>best_available</code>, <code>dl_params</code>, <code>client</code>, and any service CLI options. <code>proxy_region</code> is the country code the client resolved <code>proxy</code> from; the server matches it against its own accounts. <code>client</code> is a freeform object the dashboard shows as sent (the CLI puts <code>version</code>, <code>code_hash</code>, <code>platform</code> and a redacted <code>argv</code> in it); the server ignores it above 4096 bytes of JSON.</p>
+<p>Supply <code>service</code> and a nonblank <code>title_id</code> to create a title-bound session.
+For login alone, send <code>auth_only</code> as the boolean <code>true</code> and omit <code>title_id</code>.
+The response and session info include <code>auth_only</code> only when true.
+The server starts authentication in the background and returns immediately with <code>status: "authenticating"</code>.
+Poll the prompt endpoint until authentication completes.
+Its transient <code>approval</code> contains <code>message</code> and optional <code>url</code>, <code>code</code> and <code>expires_at</code>.
+The server clears the approval when the wait ends and excludes it from history.
+See <a href="../remote-sessions/">remote sessions</a> for the provider CLI contract and cache ownership.</p>
+<p>The request allows <code>additionalProperties</code>.
+Optional fields include <code>credentials</code> (<code>{username, password, extra?}</code>), <code>cookies</code> (base64 of zlib-compressed Netscape cookie file), <code>proxy</code>, <code>no_proxy</code>, <code>profile</code>, <code>cache</code> (map of forwarded cache files, keyed by the file path relative to the service cache directory with <code>/</code> separators and no <code>.json</code> suffix, so a nested key such as <code>session_web/&lt;sha1&gt;</code> lands in a subdirectory), <code>client_region</code>, <code>proxy_region</code>, <code>cdm_type</code>, <code>range_</code>, <code>vcodec</code>, <code>quality</code>, <code>best_available</code>, <code>dl_params</code>, <code>client</code>, and any service CLI options.
+<code>proxy_region</code> is the country code the client resolved <code>proxy</code> from.
+The server matches that country code against its own accounts.
+<code>client</code> is a freeform object the dashboard shows as sent (the CLI puts <code>version</code>, <code>code_hash</code>, <code>platform</code> and a redacted <code>argv</code> in it).
+The server ignores <code>client</code> above 4096 bytes of JSON.</p>
 <p><code>dl_params</code> is an object with the <code>dl</code> track selection: <code>lang</code>, <code>v_lang</code>, <code>a_lang</code> and <code>s_lang</code> (arrays of language strings), <code>acodec</code> (an array of audio codec names or <code>dl -a</code> aliases such as <code>ddp</code>), and <code>forced_subs</code> and <code>exact_lang</code> (booleans). The service reads these values from <code>ctx.parent.params</code>. The server uses the <code>dl</code> default for each absent or malformed value, and drops an unknown codec name.</p>
 <p>Service CLI options also travel in a nested <code>service_params</code> object. When the body has <code>service_params</code>, the server reads service options only from it, and a flat key with the same name stays a <code>dl</code> value. <code>profile</code> at the top level always means the credentials profile, never a service's own <code>--profile</code> option.</p>
 <p>The <code>proxy</code> value must be a full proxy URI, unless the operator gives your API key <code>server_proxy</code> in the <code>serve.users</code> config. Without <code>server_proxy</code>, a proxy URI gets <code>INVALID_PROXY</code> when its host is not a public address or is not a plain host name or IP address. Without <code>server_proxy</code>, the server does not resolve country codes with its own proxy providers. It rejects the request with <code>INVALID_PROXY</code> when no <code>proxy</code> is set and the reported <code>client_region</code> differs from the server's region. A request that reports no <code>client_region</code> is not blocked. Pass <code>proxy</code> with your own proxy, or <code>no_proxy</code> to accept the server's own connection. With <code>server_proxy</code>, the server resolves a country code and picks a proxy for your <code>client_region</code> itself. A Control D resolver, <code>controld://&lt;resolver&gt;@dns.controld.com</code>, counts as a full proxy URI: the server runs a forwarder for it and needs no Control D configuration of its own.</p>
@@ -4968,7 +4981,14 @@ the newlines must go out at once.</p>
 </div>
 </div>
 </div>
-<p><code>server_account</code> is <code>true</code> when the server authenticated with one of its own accounts (<code>serve.server_accounts</code>). Otherwise the server uses only what the client sent, and never falls back to its own credentials. When the login succeeds and the remote session does not use a server account, the login belongs to the client, and the client gets cookies, auth headers, and the remote session cache back. A remote session on the server's device is the exception: the client gets its cookies back, but no auth headers and no cache. For a server-account remote session the tracks and segments responses carry no cookies and no auth headers. The server also drops secret-looking keys from track data, and the cache stays on the server. A server-account service also refuses a client proxy URI, because the server's login would pass through it.</p>
+<p><code>server_account</code> is <code>true</code> when the server authenticated with one of its own accounts (<code>serve.server_accounts</code>).
+A full-mode auth-only login can also use the local service profile and retain its cache on the server.
+Other sessions use only the login material the client sent.
+When a client-managed login succeeds, the login belongs to the client, and the client gets cookies, auth headers, and the remote session cache back.
+When the session uses the server's device, the client receives only its cookies.
+For a server-account remote session the tracks and segments responses carry no cookies and no auth headers.
+The server also drops secret-looking keys from track data, and the cache stays on the server.
+A server-account service also refuses a client proxy URI, because the server's login would pass through it.</p>
 <table>
 <thead>
 <tr>
@@ -4986,12 +5006,17 @@ the newlines must go out at once.</p>
 <tr>
 <td><code>400</code></td>
 <td><code>INVALID_INPUT</code></td>
-<td>Missing <code>service</code> or <code>title_id</code>.</td>
+<td>Missing service or invalid combination of <code>auth_only</code> and <code>title_id</code>.</td>
 </tr>
 <tr>
 <td><code>400</code></td>
 <td><code>INVALID_SERVICE</code></td>
 <td>Unknown or disallowed service.</td>
+</tr>
+<tr>
+<td><code>403</code></td>
+<td><code>FORBIDDEN</code></td>
+<td>The local login requires server account access, or a server login received a client proxy URI.</td>
 </tr>
 </tbody>
 </table>
@@ -5132,7 +5157,8 @@ A slow answer arrives as a <a href="#slow-responses">slow response</a>.</p>
 </div>
 </div>
 </div>
-<p>Requires an authenticated remote session. Otherwise it returns <code>404 SESSION_NOT_FOUND</code>.</p>
+<p>Auth-only sessions return <code>400 INVALID_INPUT</code>.
+Requires an authenticated remote session. Otherwise it returns <code>404 SESSION_NOT_FOUND</code>.</p>
 <h3 id="post-apisessionsession_idtracks"><code>POST /api/session/{session_id}/tracks</code><a class="headerlink" href="#post-apisessionsession_idtracks" title="Permanent link">&para;</a></h3>
 <p>Get tracks and chapters for a specific title within the remote session. Body: <code>{ "title_id": "..." }</code> (required). Unlike <code>list-tracks</code>, track objects here <strong>include</strong> download URLs, along with session headers/cookies and manifest data the client needs to download directly. A slow answer arrives as a <a href="#slow-responses">slow response</a>.</p>
 <p><code>manifests</code> holds each served DASH/ISM manifest once. For DASH, <code>filtered_period_ids</code> names the periods that the download skips, such as ad periods. A service can build an AdaptationSet of its own that the served manifest does not contain. <code>track_manifests</code> holds a one-track MPD for each such track, and the client re-parses that in place of the whole manifest. That MPD starts at the period of the track and keeps the content periods after it.</p>
@@ -5174,7 +5200,7 @@ A slow answer arrives as a <a href="#slow-responses">slow response</a>.</p>
 <tr>
 <td><code>400</code></td>
 <td><code>INVALID_INPUT</code></td>
-<td>Missing or unknown <code>title_id</code>.</td>
+<td>Missing or unknown <code>title_id</code>, or an auth-only session.</td>
 </tr>
 <tr>
 <td><code>404</code></td>
@@ -5471,7 +5497,9 @@ A slow answer arrives as a <a href="#slow-responses">slow response</a>.</p>
 </div>
 <p><code>404 SESSION_NOT_FOUND</code> if the remote session does not exist or has expired.</p>
 <h3 id="delete-apisessionsession_id"><code>DELETE /api/session/{session_id}</code><a class="headerlink" href="#delete-apisessionsession_id" title="Permanent link">&para;</a></h3>
-<p>Tear down a remote session. The server cancels its input bridge, harvests any updated cache files, and deletes the remote session and its cache directory.</p>
+<p>The server cancels the input bridge and closes the session.
+It returns updated client cache files and removes the temporary session cache.
+It keeps the persistent cache for server logins.</p>
 <div class="tabbed-set tabbed-alternate" data-tabs="31:1"><input checked="checked" id="__tabbed_31_1" name="__tabbed_31" type="radio" /><div class="tabbed-labels"><label for="__tabbed_31_1">Response <code>200</code></label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
