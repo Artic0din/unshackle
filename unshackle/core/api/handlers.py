@@ -3896,17 +3896,32 @@ def uses_local_server_auth(normalized_service: str, *, auth_only: bool, server_a
 
 
 _COOKIE_SAVE_LOCK = threading.Lock()
+_COOKIE_SERVICE_LOCKS: dict[str, threading.Lock] = {}
 
 
-_CookieState = tuple[Optional[str], Optional[int], bool, bool, bool, tuple[tuple[str, Any], ...]]
+def _cookie_service_lock(normalized_service: str) -> threading.Lock:
+    with _COOKIE_SAVE_LOCK:
+        if normalized_service not in _COOKIE_SERVICE_LOCKS:
+            _COOKIE_SERVICE_LOCKS[normalized_service] = threading.Lock()
+        return _COOKIE_SERVICE_LOCKS[normalized_service]
+
+
+_CookieState = tuple[str, Optional[str], Optional[int], bool, bool, bool, tuple[tuple[str, Any], ...]]
 
 
 def _cookie_key(cookie: Any) -> tuple[str, str, str]:
-    return cookie.domain or "", cookie.path or "/", cookie.name
+    path = "/" if cookie.path is None else cookie.path
+    return cookie.domain or "", path, cookie.name
+
+
+def _cookie_slot(cookie: Any) -> tuple[str, str, str]:
+    path = "/" if cookie.path is None else cookie.path
+    return (cookie.domain or "").lstrip(".").strip("[]").lower(), path, cookie.name
 
 
 def _cookie_state(cookie: Any) -> _CookieState:
     return (
+        cookie.domain or "",
         cookie.value,
         cookie.expires,
         bool(cookie.secure),
@@ -3916,12 +3931,19 @@ def _cookie_state(cookie: Any) -> _CookieState:
     )
 
 
+def _auth_cookie_jar(raw_cookies: Any) -> Any:
+    export = getattr(raw_cookies, "persistable_jar", None)
+    if callable(export):
+        return export()
+    return getattr(raw_cookies, "jar", raw_cookies)
+
+
 def snapshot_auth_cookies(raw_cookies: Any) -> dict[tuple[str, str, str], _CookieState]:
     if raw_cookies is None:
         return {}
     if isinstance(raw_cookies, dict):
         return dict(raw_cookies)
-    jar = getattr(raw_cookies, "jar", raw_cookies)
+    jar = _auth_cookie_jar(raw_cookies)
     try:
         return {
             _cookie_key(c): _cookie_state(c) for c in jar if getattr(c, "name", None) and getattr(c, "domain", None)
@@ -3938,7 +3960,7 @@ def save_local_auth_cookies(
     raw_cookies = getattr(getattr(service_instance, "session", None), "cookies", None)
     if raw_cookies is None:
         return
-    jar = getattr(raw_cookies, "jar", raw_cookies)
+    jar = _auth_cookie_jar(raw_cookies)
     try:
         cookies = [c for c in jar if getattr(c, "name", None) and getattr(c, "domain", None)]
     except TypeError:
@@ -3947,12 +3969,22 @@ def save_local_auth_cookies(
         return
 
     baseline = snapshot_auth_cookies(initial_cookies)
-    with _COOKIE_SAVE_LOCK:
+    with _cookie_service_lock(normalized_service):
         cookie_file = dl.get_cookie_path(normalized_service, profile)
         target = dl.load_cookie_file(cookie_file) if cookie_file is not None and cookie_file.exists() else None
-        target_keys = {_cookie_key(c) for c in target} if target is not None else set()
+        kept_keys = {_cookie_key(c) for c in cookies}
+        target_keys = {_cookie_key(existing) for existing in target or ()}
+        target_by_slot: dict[tuple[str, str, str], list[Any]] = {}
+        for existing in target or ():
+            target_by_slot.setdefault(_cookie_slot(existing), []).append(existing)
         updates = [
-            c for c in cookies if _cookie_state(c) != baseline.get(_cookie_key(c)) or _cookie_key(c) not in target_keys
+            c
+            for c in cookies
+            if _cookie_state(c) != baseline.get(_cookie_key(c))
+            or (
+                _cookie_key(c) not in target_keys
+                and all(_cookie_key(existing) in kept_keys for existing in target_by_slot.get(_cookie_slot(c), ()))
+            )
         ]
         if not updates:
             return
@@ -3961,6 +3993,13 @@ def save_local_auth_cookies(
             cookie_file.parent.mkdir(parents=True, exist_ok=True)
         if target is None:
             target = MozillaCookieJar(cookie_file)
+        for slot in {_cookie_slot(c) for c in updates}:
+            for existing in target_by_slot.get(slot, ()):
+                if _cookie_key(existing) not in kept_keys:
+                    try:
+                        target.clear(existing.domain, existing.path, existing.name)
+                    except KeyError:
+                        pass
         for cookie in updates:
             target.set_cookie(cookie)
         with tempfile.NamedTemporaryFile(

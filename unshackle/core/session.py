@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import functools
 import http
+import ipaddress
 import logging
 import math
 import random
 import re
 import sys
+import threading
 import time
-from collections.abc import Iterator, MutableMapping
-from copy import copy
-from datetime import datetime, timezone
+from collections import Counter
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from http.cookiejar import Cookie, CookieJar
 from typing import Any, Optional, Union
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import SplitResult, quote, unquote, urlencode, urlparse, urlsplit, urlunparse
 
 import rnet
 from requests import HTTPError, Request, Response, Session
@@ -42,6 +45,70 @@ READ_TIMEOUT = 30
 
 
 DEFAULT_IMPERSONATE = rnet.Impersonate.Chrome131
+
+
+_PATH_PROBE_LOCK = threading.Lock()
+_PATH_PROBE_CLIENT = rnet.BlockingClient(cookie_store=True)
+
+
+@functools.lru_cache(maxsize=512)
+def _rnet_same_host(h1: str, h2: str) -> bool:
+    b1, b2 = h1.strip("[]").lower(), h2.strip("[]").lower()
+    if not b1 or not b2:
+        return False
+    if ":" in b1 or ":" in b2:
+        if "%" in b1 or "%" in b2:
+            return False
+        try:
+            return ipaddress.IPv6Address(b1) == ipaddress.IPv6Address(b2)
+        except ValueError:
+            return False
+    if b1 == b2:
+        return True
+    with _PATH_PROBE_LOCK:
+        _PATH_PROBE_CLIENT.clear_cookies()
+        try:
+            _PATH_PROBE_CLIENT.set_cookie(f"https://{RnetCookieAdapter._url_host(b1)}", rnet.Cookie("p", "1"))
+            return _PATH_PROBE_CLIENT.get_cookies(f"https://{RnetCookieAdapter._url_host(b2)}") == b"p=1"
+        except Exception:
+            return False
+        finally:
+            _PATH_PROBE_CLIENT.clear_cookies()
+
+
+def _rnet_host_matches(host: str, bare_domain: str, include_subdomains: bool = True) -> bool:
+    if _rnet_same_host(host, bare_domain):
+        return True
+    if include_subdomains:
+        labels = host.strip("[]").split(".")
+        return any(_rnet_same_host(".".join(labels[i:]), bare_domain) for i in range(1, len(labels)))
+    return False
+
+
+@functools.lru_cache(maxsize=512)
+def _is_exact_rnet_nonroot_path(path: str) -> bool:
+    if (
+        not path.startswith("/")
+        or path == "/"
+        or "?" in path
+        or "#" in path
+        or "\\" in path
+        or any(ord(ch) <= 0x20 or ord(ch) >= 0x7F or ch in '"<>`{}' for ch in path)
+        or any(unquote(seg) in (".", "..") for seg in path.split("/"))
+    ):
+        return False
+    with _PATH_PROBE_LOCK:
+        _PATH_PROBE_CLIENT.clear_cookies()
+        try:
+            _PATH_PROBE_CLIENT.set_cookie("https://localhost", rnet.Cookie("p", "1", path=path))
+            return (
+                _PATH_PROBE_CLIENT.get_cookies("https://localhost" + path) == b"p=1"
+                and _PATH_PROBE_CLIENT.get_cookies("https://localhost/") is None
+            )
+        except Exception:
+            return False
+        finally:
+            _PATH_PROBE_CLIENT.clear_cookies()
 
 
 def resolve_impersonate(browser: str) -> rnet.Impersonate:
@@ -78,8 +145,12 @@ class RnetResponseHeaders(MutableMapping):
         return val.decode("utf-8", errors="replace") if isinstance(val, (bytes, bytearray)) else str(val)
 
     def __getitem__(self, key: str) -> str:
-        val = self._map[key]
-        return self.decode(val)
+        if hasattr(self._map, "contains_key"):
+            return self.decode(self._map[key])
+        for k, v in self._map.items():
+            if self.decode(k).lower() == key.lower():
+                return self.decode(v)
+        raise KeyError(key)
 
     def __setitem__(self, key: str, value: str) -> None:
         raise TypeError("Response headers are read-only")
@@ -90,7 +161,9 @@ class RnetResponseHeaders(MutableMapping):
     def __contains__(self, key: object) -> bool:
         if not isinstance(key, str):
             return False
-        return self._map.contains_key(key)
+        if hasattr(self._map, "contains_key"):
+            return self._map.contains_key(key)
+        return any(self.decode(k).lower() == key.lower() for k in self._map)
 
     def __iter__(self) -> Iterator[str]:
         seen: set[str] = set()
@@ -101,13 +174,18 @@ class RnetResponseHeaders(MutableMapping):
                 yield dk
 
     def __len__(self) -> int:
-        return self._map.keys_len()
+        if hasattr(self._map, "keys_len"):
+            return self._map.keys_len()
+        return len({self.decode(k).lower() for k in self._map})
 
     def get(self, key: str, default: Optional[str] = None) -> Optional[str]:  # type: ignore[override]
-        val = self._map.get(key)
-        if val is None:
+        if hasattr(self._map, "contains_key"):
+            val = self._map.get(key)
+            return default if val is None else self.decode(val)
+        try:
+            return self[key]
+        except KeyError:
             return default
-        return self.decode(val)
 
     def items(self) -> list[tuple[str, str]]:  # type: ignore[override]
         return [(self.decode(k), self.decode(v)) for k, v in self._map.items()]
@@ -139,7 +217,8 @@ class RnetResponse:
 
     @property
     def url(self) -> str:
-        return str(self._resp.url)
+        raw_url = getattr(self._resp, "url", None)
+        return "" if raw_url is None else str(raw_url)
 
     @property
     def content_length(self) -> Optional[int]:
@@ -240,6 +319,76 @@ def utf8_text(res: Response | RnetResponse) -> str:
     return res.text
 
 
+_REDIRECT_CREDENTIAL_HEADERS = {"authorization", "proxy-authorization", "cookie"}
+
+
+def _remove_whatwg_dot_segments(path: str) -> str:
+    if not path:
+        return ""
+    segments = path.split("/")
+    out: list[str] = []
+    for index, segment in enumerate(segments):
+        if index == 0 and not segment:
+            continue
+        decoded = unquote(segment)
+        if decoded in (".", ".."):
+            if decoded == ".." and out:
+                out.pop()
+            if index == len(segments) - 1:
+                out.append("")
+        else:
+            out.append(segment)
+    return "/" + "/".join(out)
+
+
+_REDIRECT_TRIM = "".join(chr(i) for i in range(0x21))
+
+
+def _resolve_redirect_url(base_url: str, location: str) -> str:
+    base = urlsplit(base_url)
+    ref = location.strip(_REDIRECT_TRIM).replace("\t", "").replace("\r", "").replace("\n", "")
+    scheme = base.scheme
+    authority = base.netloc
+    has_authority = False
+    candidate, colon, rest = ref.partition(":")
+    if colon and candidate.isascii() and candidate[:1].isalpha() and all(c.isalnum() or c in "+-." for c in candidate):
+        scheme = candidate.lower()
+        if scheme not in ("http", "https"):
+            return ref
+        ref = rest
+        has_authority = scheme != base.scheme.lower()
+
+    path_end = min((i for c in "?#" if (i := ref.find(c)) >= 0), default=len(ref))
+    path, suffix = ref[:path_end].replace("\\", "/"), ref[path_end:]
+    if has_authority or path.startswith("//"):
+        authority, _, tail = path.lstrip("/").partition("/")
+        path = "/" + tail
+    elif not path:
+        if suffix.startswith("?"):
+            return f"{scheme}://{authority}{base.path or '/'}{suffix}"
+        _, qmark, raw_query = base_url.partition("#")[0].partition("?")
+        return f"{scheme}://{authority}{base.path or '/'}{qmark}{raw_query}{suffix}"
+    elif not path.startswith("/"):
+        path = base.path.rpartition("/")[0] + "/" + path
+    return f"{scheme}://{authority}{_remove_whatwg_dot_segments(path)}{suffix}"
+
+
+def _origin_key(parsed: SplitResult) -> tuple[str, str, Optional[int]]:
+    scheme = parsed.scheme.lower()
+    default_port = 80 if scheme == "http" else 443 if scheme == "https" else None
+    return scheme, (parsed.hostname or "").lower(), parsed.port if parsed.port is not None else default_port
+
+
+def _same_origin(first: SplitResult, second: SplitResult) -> bool:
+    s1, h1, p1 = _origin_key(first)
+    s2, h2, p2 = _origin_key(second)
+    return s1 == s2 and p1 == p2 and _rnet_same_host(h1, h2)
+
+
+_REDIRECT_BODY_HEADERS = {"content-length", "content-type", "content-encoding", "transfer-encoding"}
+_REDIRECT_HEADERS = _REDIRECT_CREDENTIAL_HEADERS | _REDIRECT_BODY_HEADERS
+
+
 class RnetSessionHeaders(CaseInsensitiveDict):
     """Dict-like headers that write to the rnet client through update()."""
 
@@ -248,10 +397,11 @@ class RnetSessionHeaders(CaseInsensitiveDict):
         self._client: Any = None
         super().__init__()
 
-    def sync(self) -> None:
+    def sync(self, client: Optional[rnet.BlockingClient] = None) -> None:
         """Push current headers to the rnet client."""
-        if self._client is not None and hasattr(self, "_store"):
-            self._client.update(headers={k: v for k, v in self.items()})
+        target = client or self._client
+        if target is not None and hasattr(self, "_store"):
+            target.update(headers={k: v for k, v in self.items() if k.lower() not in _REDIRECT_HEADERS})
 
     def __setitem__(self, key: str, value: str) -> None:
         super().__setitem__(key, value)
@@ -298,15 +448,31 @@ class RnetCookieAdapter(MutableMapping):
 
     def __init__(self, client: Any, session: Optional[RnetSession] = None) -> None:
         self._client = client
+        self._lock = threading.RLock()
+        self._active_rebuilds: dict[int, list[tuple[Any, ...]]] = {}
+        self._tls = threading.local()
         self._session = session
         self._store: dict[tuple[str, str, str], Cookie] = {}
+        self._received: dict[tuple[str, str, str], Cookie] = {}
+        self._in_flight: dict[int, tuple[int, int, rnet.BlockingClient, datetime, str, list[Any]]] = {}
+        self._seq_counter = 0
+        self._filter_clears: list[tuple[int, Optional[str], Optional[str], Optional[str]]] = []
+        self._clear_all_seq = 0
+        self._slot_seq: dict[tuple[str, str, str], int] = {}
+        self._slot_gen: dict[tuple[str, str, str], int] = {}
+        self._expiry: dict[tuple[str, str, str], datetime] = {}
         self._from_jar: set[tuple[str, str, str]] = set()
+
+    @staticmethod
+    def _url_host(host: str) -> str:
+        bare = host.strip("[]")
+        return f"[{bare}]" if ":" in bare else bare
 
     @staticmethod
     def client_url(cookie: Cookie) -> str:
         """The URL rnet stores *cookie* under; a domain-less cookie goes to localhost."""
         host = (cookie.domain or "").lstrip(".")
-        return f"https://{host}" if host else "https://localhost"
+        return f"https://{RnetCookieAdapter._url_host(host or 'localhost')}"
 
     @staticmethod
     def to_rnet(cookie: Cookie) -> rnet.Cookie:
@@ -316,6 +482,10 @@ class RnetCookieAdapter(MutableMapping):
         one the cookie stays on its own host. Expiry stays out, so no layer drops a cookie the
         cookie loader deliberately kept.
         """
+        return RnetCookieAdapter._wire_cookie(cookie)
+
+    @staticmethod
+    def _wire_cookie(cookie: Cookie, max_age: Optional[timedelta] = None) -> rnet.Cookie:
         domain = cookie.domain or ""
         return rnet.Cookie(
             cookie.name,
@@ -323,49 +493,174 @@ class RnetCookieAdapter(MutableMapping):
             domain=domain if domain.startswith(".") else None,
             path=cookie.path or "/",
             secure=bool(cookie.secure),
+            http_only=cookie.has_nonstandard_attr("HTTPOnly"),
+            max_age=max_age,
         )
 
-    def push(self, cookie: Cookie) -> None:
-        """Set *cookie* on the rnet client; before the client exists the store buffers it."""
-        if self._client is not None:
-            try:
-                self._client.set_cookie(self.client_url(cookie), self.to_rnet(cookie))
-            except Exception:
-                pass
+    def _push_cookie(
+        self,
+        cookie: Cookie,
+        key: tuple[str, str, str],
+        now: Optional[datetime] = None,
+        client: Optional[rnet.BlockingClient] = None,
+    ) -> None:
+        target = client or self._client
+        if target is None or cookie.path == "":
+            return
+        deadline = self._expiry.get(key)
+        remaining = deadline - (now or datetime.now(timezone.utc)) if deadline is not None else None
+        if remaining is not None and remaining.total_seconds() <= 0:
+            return
+        try:
+            target.set_cookie(self.client_url(cookie), self._wire_cookie(cookie, remaining))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _slot_key(domain: Optional[str], path: Optional[str], name: str) -> tuple[str, str, str]:
+        return ((domain or "").lstrip(".").strip("[]").lower(), path if path is not None else "/", name)
+
+    def _next_seq(self) -> int:
+        self._seq_counter += 1
+        return self._seq_counter
+
+    def next_seq(self) -> int:
+        with self._lock:
+            return self._next_seq()
+
+    def _discard(self, key: tuple[str, str, str]) -> None:
+        self._store.pop(key, None)
+        self._from_jar.discard(key)
+        self._received.pop(key, None)
+        self._expiry.pop(key, None)
+
+    def _prune_expired(self, now: Optional[datetime] = None) -> None:
+        now = now or datetime.now(timezone.utc)
+        for key, deadline in list(self._expiry.items()):
+            if deadline <= now:
+                cookie = self._store.get(key) or self._received.get(key)
+                cpath = key[1]
+                cdomain = cookie.domain if cookie is not None else f".{key[0]}"
+                self._record_touch(
+                    key[2], domain=cdomain, path=cpath, include_subdomains=(cpath == "/" and cdomain.startswith("."))
+                )
+                self._discard(key)
 
     def add(self, cookie: Cookie, from_jar: bool = False) -> None:
         """Store *cookie* as the latest write for its (domain, path, name) and send it to the client."""
-        key = (cookie.domain or "", cookie.path or "/", cookie.name)
-        self._store.pop(key, None)
-        self._store[key] = cookie
-        if from_jar:
-            self._from_jar.add(key)
-        self.push(cookie)
+        with self._lock:
+            key = self._slot_key(cookie.domain, cookie.path, cookie.name)
+            cpath = key[1]
+            self._record_touch(
+                cookie.name,
+                domain=cookie.domain,
+                path=cpath,
+                include_subdomains=cpath == "/" and bool(cookie.domain and cookie.domain.startswith(".")),
+            )
+            self._expiry.pop(key, None)
+            self._received.pop(key, None)
+            self._store.pop(key, None)
+            if self._session is not None:
+                self._slot_gen[key] = self._session._published_gen
+            self._slot_seq[key] = self._next_seq()
+            self._store[key] = cookie
+            if from_jar:
+                self._from_jar.add(key)
+            self._push_cookie(cookie, key)
 
     def snapshot(self) -> list[Cookie]:
         """Every stored cookie, oldest write first. Download threads write the store, so read a copy."""
-        return list(self._store.values())
+        with self._lock:
+            self._prune_expired()
+            return list(self._store.values())
 
     def flush_to_client(self) -> None:
         """Push all buffered cookies to the rnet client after unshackle makes it."""
-        for cookie in self.snapshot():
-            self.push(cookie)
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            self._prune_expired(now)
+            for jar in (self._store, self._received):
+                for key, cookie in list(jar.items()):
+                    self._push_cookie(cookie, key, now, getattr(self._tls, "rebuild_client", None))
 
-    def client_urls(self, domain: Optional[str] = None, name: Optional[str] = None) -> list[str]:
+    def _pending_cookies(
+        self, now: Optional[datetime] = None
+    ) -> list[tuple[int, int, rnet.BlockingClient, tuple[str, str, str], Cookie, Optional[datetime]]]:
+        now = now or datetime.now(timezone.utc)
+        rows = []
+        for seq, req_gen, req_client, arrived, url, cookies in sorted(self._in_flight.values()):
+            parsed = urlparse(url)
+            default_path = (parsed.path[: parsed.path.rfind("/")] or "/") if parsed.path.startswith("/") else "/"
+            for raw in cookies:
+                row = self._parse_server_cookie(raw, parsed.hostname or "", default_path, arrived, now)
+                if row is not None:
+                    key, fresh, deadline = row
+                    rows.append((seq, req_gen, req_client, key, fresh, deadline))
+        return rows
+
+    def _pending_staged(
+        self, now: datetime, target_client: Optional[rnet.BlockingClient] = None, name: Optional[str] = None
+    ) -> dict[tuple[str, str, str], tuple[Cookie, Optional[datetime]]]:
+        return {
+            key: (fresh, deadline)
+            for seq, req_gen, req_client, key, fresh, deadline in self._pending_cookies(now)
+            if (name is None or fresh.name == name)
+            and not self._superseded(seq, key, fresh)
+            and not (
+                target_client is not None
+                and req_client is not None
+                and req_client is not target_client
+                and self._slot_gen.get(key, -1) > req_gen
+            )
+        }
+
+    @staticmethod
+    def _is_safe_url_path(path: str) -> bool:
+        return path == "/" or _is_exact_rnet_nonroot_path(path)
+
+    def client_urls(
+        self,
+        domain: Optional[str] = None,
+        name: Optional[str] = None,
+        path: Optional[str] = None,
+        include_subdomains: bool = False,
+    ) -> list[str]:
         """URLs the rnet cookie jar could hold a cookie under.
 
         rnet keys its jar by URL, removes a cookie only at its exact path, and cannot list the
         jar. So a removal names every host this class has set a cookie on, every origin the
         HTTP session has requested, and every stored path of the cookie *name*.
         """
-        cookies = self.snapshot()
+        cookies = list(self._store.values()) + list(self._received.values())
+        cookies.extend(fresh for _, _, _, _, fresh, _ in self._pending_cookies())
         hosts = {self.client_url(c) for c in cookies} | {"https://localhost"}
         if self._session is not None:
             hosts |= set(self._session._origins)
         if domain is not None:
-            host = domain.lstrip(".")
-            hosts = {url for url in hosts if (urlparse(url).hostname or "") == host} | {f"https://{host}"}
-        paths = {c.path for c in cookies if c.path and c.path != "/" and (name is None or c.name == name)}
+            if any(ord(ch) <= 0x20 or ord(ch) == 0x7F or ch in "/?#@\\" for ch in domain):
+                return []
+            host_bare = "localhost" if domain == "" else domain.lstrip(".").strip("[]").lower()
+            if not host_bare:
+                return []
+            hosts = {
+                url
+                for url in hosts
+                if _rnet_host_matches(urlsplit(url).hostname or "", host_bare, include_subdomains=include_subdomains)
+            }
+            hosts.add(f"https://{self._url_host(host_bare)}")
+        if path is not None:
+            if path == "/":
+                return sorted(hosts)
+            if not _is_exact_rnet_nonroot_path(path):
+                return []
+            return sorted({url + path for url in hosts})
+        paths = {
+            c.path
+            for c in cookies
+            if c.path and _is_exact_rnet_nonroot_path(c.path) and (name is None or c.name == name)
+        }
+        if self._session is not None:
+            paths.update(p for p in self._session._paths if _is_exact_rnet_nonroot_path(p))
         return sorted(hosts | {url + path for url in hosts for path in paths})
 
     def remove_cookie_on_client(self, name: str, domain: Optional[str] = None) -> None:
@@ -382,37 +677,215 @@ class RnetCookieAdapter(MutableMapping):
             except Exception:
                 pass
 
-    def absorb(self, response: Any) -> None:
-        """Take a value the server set for a stored cookie, so a client rebuild or a cookie save keeps it.
+    @staticmethod
+    def _received_domain(domain: Optional[str], host: str) -> Optional[str]:
+        host = host.strip("[]")
+        if domain is None:
+            return host or None
+        bare = domain.strip().lstrip(".").lower()
+        if not bare or (bare != host and not host.endswith(f".{bare}")):
+            return None
+        try:
+            ipaddress.ip_address(bare)
+        except ValueError:
+            return f".{bare}"
+        return bare
 
-        A server cookie replaces each stored cookie of the same name and path that covers the
-        response host, and an expired one drops it.
-        """
-        server_cookies = response.cookies if self._store else None
-        if not server_cookies:
+    def _parse_server_cookie(
+        self, server_cookie: Any, host: str, default_path: str, arrived_at: datetime, now: datetime
+    ) -> Optional[tuple[tuple[str, str, str], Cookie, Optional[datetime]]]:
+        path = server_cookie.path if (server_cookie.path or "").startswith("/") else default_path
+        domain = self._received_domain(server_cookie.domain, host.lower())
+        if domain is None or not server_cookie.name:
+            return None
+        key = self._slot_key(domain, path, server_cookie.name)
+        max_age, expires = server_cookie.max_age, server_cookie.expires
+        if max_age is not None:
+            deadline = arrived_at + max_age
+        elif expires is not None and expires.tzinfo is None:
+            deadline = expires.replace(tzinfo=timezone.utc)
+        else:
+            deadline = expires
+
+        fresh = create_cookie(
+            server_cookie.name,
+            server_cookie.value,
+            domain=domain,
+            path=path,
+            secure=bool(server_cookie.secure),
+            expires=int(deadline.timestamp()) if deadline is not None else None,
+            discard=deadline is None,
+            rest={"HTTPOnly": ""} if server_cookie.http_only else {},
+        )
+        fresh.domain_specified = domain.startswith(".")
+        fresh.path_specified = (server_cookie.path or "").startswith("/")
+        return key, fresh, deadline
+
+    def _superseded(self, seq: int, key: tuple[str, str, str], fresh: Cookie) -> bool:
+        return seq < max(self._clear_all_seq, self._slot_seq.get(key, 0)) or any(
+            seq < clear_seq
+            and domain in (None, fresh.domain)
+            and path in (None, fresh.path)
+            and name in (None, fresh.name)
+            for clear_seq, domain, path, name in self._filter_clears
+        )
+
+    def _reconcile_name_on_client(
+        self,
+        target_client: Optional[rnet.BlockingClient],
+        name: str,
+        urls: Optional[Iterable[str]] = None,
+        now: Optional[datetime] = None,
+        staged: Optional[dict[tuple[str, str, str], tuple[Cookie, Optional[datetime]]]] = None,
+        repush_all: bool = False,
+    ) -> None:
+        if target_client is None:
             return
-        parsed = urlparse(response.url)
-        host = parsed.hostname or ""
-        default_path = (parsed.path[: parsed.path.rfind("/")] or "/") if parsed.path.startswith("/") else "/"
-        now = datetime.now(timezone.utc)
-        for server_cookie in server_cookies:
-            path = server_cookie.path if (server_cookie.path or "").startswith("/") else default_path
-            expires, max_age = server_cookie.expires, server_cookie.max_age
-            if expires is not None and expires.tzinfo is None:
-                expires = expires.replace(tzinfo=timezone.utc)
-            expired = (max_age is not None and max_age.total_seconds() <= 0) or (expires is not None and expires <= now)
-            for cookie in self.snapshot():
-                domain = cookie.domain or ""
-                if cookie.name != server_cookie.name or cookie.path != path or not domain:
+        now = now or datetime.now(timezone.utc)
+        active_staged = staged if staged is not None else self._pending_staged(now, target_client, name=name)
+        remove_urls = set(urls) if urls is not None else set(self.client_urls(name=name))
+        remove_hosts = {urlsplit(url).hostname or "" for url in remove_urls}
+
+        def _touches_host(cookie_domain: Optional[str]) -> bool:
+            bare = (cookie_domain or "localhost").lstrip(".").strip("[]").lower()
+            return repush_all or any(_rnet_host_matches(host, bare, include_subdomains=True) for host in remove_hosts)
+
+        for url in remove_urls:
+            try:
+                target_client.remove_cookie(url, name)
+            except Exception:
+                continue
+        for jar in (self._store, self._received):
+            for key, cookie in jar.items():
+                if cookie.name == name and key not in active_staged and _touches_host(cookie.domain):
+                    self._push_cookie(cookie, key, now, target_client)
+
+        for fresh, deadline in active_staged.values():
+            if fresh.name == name and (deadline is None or deadline > now) and _touches_host(fresh.domain):
+                remaining = deadline - now if deadline is not None else None
+                target_client.set_cookie(self.client_url(fresh), self._wire_cookie(fresh, remaining))
+
+    def absorb(
+        self,
+        response: Any,
+        request_client: Optional[rnet.BlockingClient] = None,
+        req_gen: Optional[int] = None,
+        resp_seq: Optional[int] = None,
+        received_at: Optional[datetime] = None,
+    ) -> None:
+        """Mirror Set-Cookie at its exact scope after rnet has updated the wire jar."""
+        with self._lock:
+            server_cookies = response.cookies
+            if not server_cookies:
+                return
+            parsed = urlparse(response.url)
+            host = parsed.hostname or ""
+            default_path = (parsed.path[: parsed.path.rfind("/")] or "/") if parsed.path.startswith("/") else "/"
+            now = datetime.now(timezone.utc)
+            for server_cookie in server_cookies:
+                row = self._parse_server_cookie(server_cookie, host, default_path, received_at or now, now)
+                if row is None:
                     continue
-                if host != domain.lstrip(".") and not (domain.startswith(".") and host.endswith(domain)):
+                key, fresh, deadline = row
+                path = fresh.path or "/"
+                safe_path = path == "/" or self._is_safe_url_path(path)
+                probe_url = self.client_url(fresh) + (path if path != "/" else "")
+                extra = {probe_url} if safe_path else set()
+                rebuild_subdomains = path == "/" and bool(fresh.domain and fresh.domain.startswith("."))
+                live_urls = (
+                    set(self.client_urls(domain=fresh.domain, name=fresh.name, path=path, include_subdomains=False))
+                    | extra
+                )
+                rebuild_urls = (
+                    set(
+                        self.client_urls(
+                            domain=fresh.domain, name=fresh.name, path=path, include_subdomains=rebuild_subdomains
+                        )
+                    )
+                    | extra
+                )
+                if resp_seq is not None and self._superseded(resp_seq, key, fresh):
+                    if self._client is not None:
+                        self._reconcile_name_on_client(
+                            self._client,
+                            fresh.name,
+                            rebuild_urls
+                            if request_client is not None and request_client is not self._client
+                            else live_urls,
+                            now,
+                        )
                     continue
-                if expired:
-                    self.clear(domain=domain, path=path, name=cookie.name)
-                elif cookie.value != server_cookie.value:
-                    fresh = copy(cookie)
-                    fresh.value = server_cookie.value
-                    self.add(fresh)
+                if (
+                    req_gen is not None
+                    and request_client is not None
+                    and self._client is not None
+                    and request_client is not self._client
+                    and self._slot_gen.get(key, -1) > req_gen
+                ):
+                    continue
+                if request_client is not None and safe_path:
+                    raw = request_client.get_cookies(probe_url) or b""
+                    slot_vals = [
+                        v
+                        for n, v in RnetSession.parse_cookie_header(raw.decode("utf-8", errors="replace"))
+                        if n == fresh.name
+                    ]
+                    for jar in (self._store, self._received):
+                        for other_key, other in jar.items():
+                            other_path = other.path or "/"
+                            if (
+                                other_key != key
+                                and other.name == fresh.name
+                                and other.domain
+                                and (
+                                    other_key[0] == key[0]
+                                    or (other.domain.startswith(".") and key[0].endswith("." + other_key[0]))
+                                )
+                                and (path == other_path or path.startswith(other_path.rstrip("/") + "/"))
+                                and other.value in slot_vals
+                            ):
+                                slot_vals.remove(other.value)
+                    if deadline is None or deadline > now:
+                        if fresh.value not in slot_vals:
+                            continue
+                    else:
+                        cur = self._store.get(key) or self._received.get(key)
+                        if cur is not None and (cur.value or "") in slot_vals:
+                            continue
+                self._slot_seq[key] = resp_seq if resp_seq is not None else self._next_seq()
+                self._slot_gen[key] = (
+                    req_gen
+                    if req_gen is not None
+                    else (self._session._published_gen if self._session is not None else 0)
+                )
+                self._record_touch(fresh.name, domain=fresh.domain, path=path, include_subdomains=rebuild_subdomains)
+                if deadline is not None and deadline <= now:
+                    self._discard(key)
+                    if self._client is not None and request_client is not self._client:
+                        self._reconcile_name_on_client(self._client, fresh.name, rebuild_urls, now)
+                    continue
+                jar = self._store if key in self._store else self._received
+                jar.pop(key, None)
+                jar[key] = fresh
+                if deadline is None:
+                    self._expiry.pop(key, None)
+                else:
+                    self._expiry[key] = deadline
+                if self._client is not None and request_client is not self._client:
+                    self._reconcile_name_on_client(self._client, fresh.name, rebuild_urls, now)
+
+    def persistable_jar(self) -> CookieJar:
+        """Export stored and received cookies with their original scopes."""
+        with self._lock:
+            self._prune_expired()
+            jar = CookieJar()
+            for key, cookie in list(self._store.items()):
+                if cookie.name and cookie.domain and (key in self._from_jar or key[0] != "localhost"):
+                    jar.set_cookie(cookie)
+            for key, cookie in list(self._received.items()):
+                if key not in self._store:
+                    jar.set_cookie(cookie)
+            return jar
 
     @property
     def jar(self) -> CookieJar:
@@ -421,11 +894,13 @@ class RnetCookieAdapter(MutableMapping):
         ``save_cookies`` in dl.py uses this to write cookies back to disk, so it carries a value
         the server rotated for one of those cookies but not the cookies set by name.
         """
-        jar = CookieJar()
-        for key, cookie in list(self._store.items()):
-            if key in self._from_jar:
-                jar.set_cookie(cookie)
-        return jar
+        with self._lock:
+            self._prune_expired()
+            jar = CookieJar()
+            for key, cookie in list(self._store.items()):
+                if key in self._from_jar:
+                    jar.set_cookie(cookie)
+            return jar
 
     def update(self, other: Any = None, /, **kwargs: Any) -> None:
         if other is None:
@@ -486,25 +961,93 @@ class RnetCookieAdapter(MutableMapping):
         - ``clear()`` removes all cookies.
         - ``clear(domain=..., path=..., name=...)`` removes the cookies that match every given filter.
         """
-        if domain is None and path is None and name is None:
-            self._store.clear()
-            self._from_jar.clear()
-            if self._client is not None:
-                self._client.clear_cookies()
-            return
+        with self._lock:
+            if domain is None and path is None and name is None:
+                self._clear_all_seq = self._next_seq()
+                self._filter_clears.clear()
+                self._slot_seq.clear()
+                for journal in self._active_rebuilds.values():
+                    journal.append(("clear_all",))
+                for key in (*self._received, *self._store):
+                    if self._session is not None:
+                        self._slot_gen[key] = self._session._published_gen
+                    self._discard(key)
+                self._expiry.clear()
+                self._received.clear()
+                self._store.clear()
+                self._from_jar.clear()
+                if self._client is not None:
+                    self._client.clear_cookies()
+                return
 
-        def hit(cookie: Cookie) -> bool:
-            return domain in (None, cookie.domain) and path in (None, cookie.path) and name in (None, cookie.name)
+            def hit(cookie: Cookie) -> bool:
+                return domain in (None, cookie.domain) and path in (None, cookie.path) and name in (None, cookie.name)
 
-        names = {name} if name is not None else {c.name for c in self.snapshot() if hit(c)}
-        for each in names:
-            self.remove_cookie_on_client(each, domain)
-        self._store = {key: c for key, c in list(self._store.items()) if not hit(c)}
-        self._from_jar &= self._store.keys()
-        # removal on the client is by host and name, so put back what a path filter spared
-        for cookie in self.snapshot():
-            if cookie.name in names:
-                self.push(cookie)
+            now = datetime.now(timezone.utc)
+            self._prune_expired(now)
+            pending = self._pending_cookies(now)
+            names = (
+                {name}
+                if name is not None
+                else {
+                    c.name
+                    for c in (*self._store.values(), *self._received.values(), *(row[4] for row in pending))
+                    if hit(c)
+                }
+            )
+            clear_seq = self._next_seq()
+            self._filter_clears.append((clear_seq, domain, path, name))
+            rebuild_subdomains = path in (None, "/") and bool(domain and domain.startswith("."))
+            for each in names:
+                self._record_touch(each, domain=domain, path=path, include_subdomains=rebuild_subdomains)
+            urls = {each: self.client_urls(domain=domain, name=each, path=path) for each in names}
+            for jar in (self._store, self._received):
+                for key, cookie in list(jar.items()):
+                    if hit(cookie):
+                        self._slot_seq[key] = clear_seq
+                        if self._session is not None:
+                            self._slot_gen[key] = self._session._published_gen
+                        self._discard(key)
+            for seq, _, _, key, fresh, _ in pending:
+                if seq < clear_seq and hit(fresh):
+                    self._slot_seq[key] = max(self._slot_seq.get(key, 0), clear_seq)
+                    if self._session is not None:
+                        self._slot_gen[key] = self._session._published_gen
+            for each in names:
+                self._reconcile_name_on_client(self._client, each, urls[each], now)
+
+    def _record_touch(
+        self, name: str, domain: Optional[str] = None, path: Optional[str] = None, include_subdomains: bool = False
+    ) -> None:
+        if self._active_rebuilds:
+            urls = set(self.client_urls(domain=domain, name=name, path=path, include_subdomains=include_subdomains))
+            for journal in self._active_rebuilds.values():
+                journal.append(("touch", name, urls))
+
+    def finish_rebuild(self, client: rnet.BlockingClient, journal: list[tuple[Any, ...]]) -> None:
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            touched: dict[str, set[str]] = {}
+            had_clear_all = any(op[0] == "clear_all" for op in journal)
+            if had_clear_all:
+                client.clear_cookies()
+                touched.update((c.name, set()) for jar in (self._store, self._received) for c in jar.values())
+            for op in journal:
+                if op[0] == "touch":
+                    touched.setdefault(op[1], set()).update(op[2])
+            staged = self._pending_staged(now, client)
+            for _, _, _, _, fresh, _ in self._pending_cookies(now):
+                fpath = fresh.path or "/"
+                touched.setdefault(fresh.name, set()).update(
+                    self.client_urls(
+                        domain=fresh.domain,
+                        name=fresh.name,
+                        path=fpath,
+                        include_subdomains=fpath == "/" and bool(fresh.domain and fresh.domain.startswith(".")),
+                    )
+                )
+            for name, urls in touched.items():
+                self._reconcile_name_on_client(client, name, urls, now, staged, repush_all=had_clear_all)
 
     def items(self) -> list[tuple[str, str]]:  # type: ignore[override]
         return list(self.flat().items())
@@ -621,7 +1164,9 @@ class RnetSession:
             "read_timeout",
             "proxies",
             "verify",
+            "referer",
             "allow_redirects",
+            "max_redirects",
             "pool_idle_timeout",
             "pool_max_idle_per_host",
             "pool_max_size",
@@ -644,7 +1189,11 @@ class RnetSession:
 
         self._client_kwargs = dict(client_kwargs)
         self._client: Optional[rnet.BlockingClient] = None
+        self._published_gen = 0
+        self._rebuild_gen = 0
+        self._paths: set[str] = set()
         self._origins: set[str] = set()
+        self._copy_urls: set[str] = set()
 
         self.headers = RnetSessionHeaders(self)
         self.cookies = RnetCookieAdapter(None, self)
@@ -695,22 +1244,43 @@ class RnetSession:
 
         A new client also starts with an empty cookie jar. This method replays the stored
         cookies, which hold any value the server rotated for them, then the root-path cookies
-        of every origin this HTTP session has used. A cookie the server set on a deeper path
-        that the store never held is lost, because rnet cannot list its jar. The new client
+        of every origin this HTTP session has used. The new client
         goes on the HTTP session last, so a request from another thread keeps the old client
         until the new one holds the headers and the cookies.
         """
-        old_client = self._client
-        if old_client is None:
-            return
-        client = rnet.BlockingClient(**self._client_kwargs)
-        self.headers._client = client
-        self.headers.sync()
-        self.cookies._client = client
-        self.cookies.flush_to_client()
-        for origin in list(self._origins):
-            self.copy_cookies(old_client, client, origin)
-        self._client = client
+        with self.cookies._lock:
+            old_client = self._client
+            if old_client is None:
+                return
+            self._rebuild_gen += 1
+            gen = self._rebuild_gen
+            self.cookies._active_rebuilds[gen] = []
+        try:
+            client = rnet.BlockingClient(**self._client_kwargs)
+            with self.cookies._lock:
+                prev = getattr(self.cookies._tls, "rebuild_client", None)
+                self.cookies._tls.rebuild_client = client
+                try:
+                    self.headers.sync(client)
+                    self.cookies.flush_to_client()
+                finally:
+                    self.cookies._tls.rebuild_client = prev
+            for origin in sorted(self._origins | self._copy_urls, key=lambda u: (len(urlsplit(u).path), u)):
+                self.copy_cookies(old_client, client, origin)
+            with self.cookies._lock:
+                self.cookies._prune_expired()
+                journal = self.cookies._active_rebuilds.pop(gen)
+                if gen != self._rebuild_gen:
+                    return
+                self.cookies.finish_rebuild(client, journal)
+                self.headers.sync(client)
+                self.headers._client = client
+                self.cookies._client = client
+                self._published_gen = gen
+                self._client = client
+        finally:
+            with self.cookies._lock:
+                self.cookies._active_rebuilds.pop(gen, None)
 
     @staticmethod
     def parse_cookie_header(header: str) -> Iterator[tuple[str, str]]:
@@ -734,17 +1304,25 @@ class RnetSession:
         """Copy one origin's cookies between clients. rnet cannot list the whole cookie jar."""
         try:
             raw = source.get_cookies(origin)
+            existing = target.get_cookies(origin) or b""
         except Exception:
             return
         if not raw:
             return
-        RnetSession.set_cookie_header(target, origin, raw.decode("utf-8", errors="replace"))
+        satisfied = Counter(RnetSession.parse_cookie_header(existing.decode("utf-8", errors="replace")))
+        for name, value in RnetSession.parse_cookie_header(raw.decode("utf-8", errors="replace")):
+            if satisfied[name, value]:
+                satisfied[name, value] -= 1
+            else:
+                try:
+                    target.set_cookie(origin, rnet.Cookie(name, value))
+                except Exception:
+                    pass
 
     def export_origin_cookies(self) -> dict[str, str]:
         """Cookie headers the live client holds, one per origin this HTTP session has requested.
 
-        The client owns its own cookie jar, so a cookie a server set lives there and in no
-        part of :class:`RnetCookieAdapter`, which records only what was set through it. rnet
+        The client also holds cookies from intermediate redirects. rnet
         cannot list the jar, so this covers the origins already requested and no others.
         """
         if self._client is None:
@@ -775,9 +1353,74 @@ class RnetSession:
         for cookie in self.cookies.snapshot():
             bare = (cookie.domain or "").lstrip(".")
             live = any(h == bare or h.endswith("." + bare) for h in hosts.get(cookie.name, ()))
-            if not (live and cookie.path in ("", "/")):
+            if not (live and cookie.path in (None, "/")):
                 jar.set_cookie(cookie)
         return jar
+
+    @staticmethod
+    @functools.lru_cache(maxsize=512)
+    def _canonical_import_target(origin: str) -> Optional[tuple[str, str, str]]:
+        """Choose a replay URL whose cookie default-path matches the imported cookie."""
+        cleaned = origin.strip("".join(map(chr, range(33)))).translate(str.maketrans("", "", "\t\r\n"))
+        scheme, separator, rest = cleaned.partition(":")
+        scheme = scheme.lower()
+        if not separator or scheme not in ("http", "https"):
+            return None
+        rest = rest.lstrip("/\\")
+        cut = next((i for i, ch in enumerate(rest) if ch in "/\\?#"), len(rest))
+        authority, tail = rest[:cut], rest[cut:]
+        if not authority:
+            return None
+        try:
+            parsed = urlsplit(f"{scheme}://{authority}")
+            host = parsed.hostname
+            if not host:
+                return None
+            host = RnetCookieAdapter._url_host(host)
+            port = parsed.port
+        except (ValueError, UnicodeError):
+            return None
+        base_origin = f"{scheme}://{host}"
+        if port is not None and port != (443 if scheme == "https" else 80):
+            base_origin += f":{port}"
+        raw_path = tail.partition("?")[0].partition("#")[0].replace("\\", "/")
+        parts = raw_path.split("/")[1:]
+        segments: list[str] = []
+        for index, segment in enumerate(parts):
+            decoded = unquote(segment)
+            if decoded in (".", ".."):
+                if decoded == ".." and segments:
+                    segments.pop()
+                if index == len(parts) - 1:
+                    segments.append("")
+            else:
+                segments.append(
+                    "".join(
+                        quote(ch, safe="") if ord(ch) <= 32 or ord(ch) >= 127 or ch in '"<>`{}' else ch
+                        for ch in segment
+                    )
+                )
+        with _PATH_PROBE_LOCK:
+            _PATH_PROBE_CLIENT.clear_cookies()
+            try:
+                _PATH_PROBE_CLIENT.set_cookie(origin, rnet.Cookie("p", "1"))
+                if _PATH_PROBE_CLIENT.get_cookies(origin) != b"p=1":
+                    return None
+                if _PATH_PROBE_CLIENT.get_cookies(base_origin + "/") == b"p=1":
+                    return base_origin, "/", base_origin
+                prefixes: set[str] = set()
+                current = ""
+                for segment in segments:
+                    current += "/" + segment
+                    prefixes.update((current, current + "/"))
+                for candidate in sorted(prefixes, key=len):
+                    if _PATH_PROBE_CLIENT.get_cookies(base_origin + candidate) == b"p=1":
+                        return base_origin, candidate, f"{base_origin}{candidate}/"
+            except Exception:
+                return None
+            finally:
+                _PATH_PROBE_CLIENT.clear_cookies()
+        return None
 
     def import_origin_cookies(self, exported: dict[str, str]) -> None:
         """Load cookie headers from :meth:`export_origin_cookies` into this HTTP session's client."""
@@ -786,6 +1429,13 @@ class RnetSession:
         client = self.ensure_client()
         for origin, header in exported.items():
             self.set_cookie_header(client, origin, header)
+            target = self._canonical_import_target(origin)
+            if target is not None:
+                base_origin, default_path, copy_url = target
+                self._origins.add(base_origin)
+                if copy_url != base_origin:
+                    self._copy_urls.add(copy_url)
+                self._record_paths(f"{base_origin}{default_path}")
 
     def build_url(self, url: str, params: Optional[Any] = None) -> str:
         """Encode params into the URL (rnet ignores the params kwarg).
@@ -836,13 +1486,161 @@ class RnetSession:
         sleep_time = backoff_value + random.uniform(-jitter, jitter)
         return min(sleep_time, self.max_backoff)
 
-    def absorb_cookies(self, response: RnetResponse) -> RnetResponse:
+    def absorb_cookies(
+        self,
+        response: RnetResponse,
+        request_client: Optional[rnet.BlockingClient] = None,
+        req_gen: Optional[int] = None,
+        resp_seq: Optional[int] = None,
+        received_at: Optional[datetime] = None,
+    ) -> RnetResponse:
         """Record a value the server set for a stored cookie; a cookie fault must never fail the request."""
         try:
-            self.cookies.absorb(response)
+            parsed = urlparse(response.url)
+            if parsed.scheme and parsed.netloc:
+                self._origins.add(f"{parsed.scheme}://{parsed.netloc}")
+            self.cookies.absorb(response, request_client, req_gen, resp_seq, received_at=received_at)
         except Exception:  # nosec B110 - the store keeps its old value, the rnet jar still has the new one
             pass
+        finally:
+            with self.cookies._lock:
+                if resp_seq is not None:
+                    self.cookies._in_flight.pop(resp_seq, None)
         return response
+
+    def _record_paths(self, url: str, server_cookies: Any = None) -> None:
+        path = urlsplit(url).path
+        while path and path != "/":
+            if RnetCookieAdapter._is_safe_url_path(path):
+                self._paths.add(path)
+            path = path.rpartition("/")[0]
+        self._paths.update(
+            ck.path
+            for ck in server_cookies or ()
+            if ck.path and ck.path != "/" and RnetCookieAdapter._is_safe_url_path(ck.path)
+        )
+
+    def _request_once(
+        self,
+        client: rnet.BlockingClient,
+        req_gen: int,
+        rnet_method: rnet.Method,
+        method_upper: str,
+        url: str,
+        **kwargs: Any,
+    ) -> RnetResponse:
+        raw_allow = kwargs.pop("allow_redirects", None)
+        if raw_allow is None:
+            raw_allow = self._client_kwargs.get("allow_redirects")
+        allow_redirects = True if raw_allow is None else bool(raw_allow)
+        raw_max = kwargs.pop("max_redirects", None)
+        if raw_max is None:
+            raw_max = self._client_kwargs.get("max_redirects")
+        max_redirects = 10 if raw_max is None else raw_max
+        auto_referer = (
+            self._client_kwargs.get("referer") is not False
+            and "referer" not in self.headers
+            and not any(key.lower() == "referer" for key in (kwargs.get("headers") or {}))
+        )
+        if isinstance(kwargs.get("query"), Mapping):
+            kwargs["query"] = list(kwargs["query"].items())
+        hop = 0
+        while True:
+            current = urlsplit(url)
+            if current.scheme and current.netloc:
+                self._origins.add(f"{current.scheme}://{current.netloc}")
+            self._record_paths(url)
+            raw_response = client.request(rnet_method, url, allow_redirects=False, **kwargs)
+            received_at = datetime.now(timezone.utc)
+            resp_seq: Optional[int] = None
+            try:
+                raw_url = raw_response.url if raw_response is not None else None
+                raw_cookies = list(raw_response.cookies or ()) if raw_response is not None else []
+            except Exception:
+                raw_url, raw_cookies = None, []
+            if isinstance(raw_url, str):
+                with self.cookies._lock:
+                    resp_split = urlsplit(raw_url)
+                    if resp_split.scheme and resp_split.netloc:
+                        self._origins.add(f"{resp_split.scheme}://{resp_split.netloc}")
+                    self._record_paths(raw_url, raw_cookies)
+                    resp_seq = self.cookies.next_seq()
+                    self.cookies._in_flight[resp_seq] = (
+                        resp_seq,
+                        req_gen,
+                        client,
+                        received_at,
+                        raw_url,
+                        raw_cookies,
+                    )
+            response = self.absorb_cookies(
+                RnetResponse(raw_response), client, req_gen, resp_seq, received_at=received_at
+            )
+            if not allow_redirects or response.status_code not in (301, 302, 303, 307, 308):
+                return response
+            headers = getattr(response, "headers", None)
+            location = None
+            if isinstance(headers, (RnetResponseHeaders, CaseInsensitiveDict)):
+                location = headers.get("location")
+            elif headers is not None:
+                location = next((v for k, v in headers.items() if k.lower() == "location"), None)
+            if location is None:
+                return response
+            base_url = getattr(response, "url", None) or url
+            try:
+                next_url = _resolve_redirect_url(base_url, location)
+                following = urlsplit(next_url)
+                _ = following.port
+                if following.scheme not in ("http", "https") or not following.hostname:
+                    return response
+                if hasattr(client, "get_cookies"):
+                    client.get_cookies(next_url)
+            except (ValueError, rnet.URLParseError, rnet.BuilderError):
+                return response
+            code = response.status_code
+            body = kwargs.get("body")
+            if code in (307, 308) and (
+                kwargs.get("multipart") is not None
+                or (body is not None and not isinstance(body, (str, bytes, bytearray, memoryview)))
+            ):
+                return response
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+            if hop + 1 >= max_redirects:
+                raise rnet.RedirectError(f"Exceeded {max_redirects} redirects")
+            hop += 1
+            kwargs.pop("query", None)
+            drop_headers: set[str] = set()
+            if code in (301, 302, 303):
+                if method_upper != "HEAD":
+                    method_upper, rnet_method = "GET", rnet.Method.GET
+                for field in ("body", "form", "json", "multipart"):
+                    kwargs.pop(field, None)
+                drop_headers.update(_REDIRECT_BODY_HEADERS)
+            actual_current = urlsplit(base_url)
+            if not _same_origin(actual_current, following):
+                drop_headers.update(_REDIRECT_CREDENTIAL_HEADERS)
+                for field in ("auth", "bearer_auth", "basic_auth", "cookies"):
+                    kwargs.pop(field, None)
+            if auto_referer:
+                drop_headers.add("referer")
+            hop_headers = {k: v for k, v in (kwargs.get("headers") or {}).items() if k.lower() not in drop_headers}
+            if auto_referer:
+                # rnet removes userinfo from its response URL.
+                if (
+                    current.username is None
+                    and current.password is None
+                    and actual_current.username is None
+                    and actual_current.password is None
+                    and not (actual_current.scheme == "https" and following.scheme == "http")
+                ):
+                    _, qmark, raw_query = base_url.partition("#")[0].partition("?")
+                    hop_headers["Referer"] = (
+                        f"{actual_current.scheme}://{actual_current.netloc}{actual_current.path or '/'}{qmark}{raw_query}"
+                    )
+            kwargs["headers"] = hop_headers
+            url = next_url
 
     def request(self, method: str, url: str, **kwargs: Any) -> RnetResponse:
         """Send a request, retrying on the status forcelist and on the caught exception types.
@@ -852,7 +1650,9 @@ class RnetSession:
         means one try with no retries. Once the budget is spent, this method raises
         MaxRetriesError with the last failure as its cause.
         """
-        client = self.ensure_client()
+        with self.cookies._lock:
+            client = self.ensure_client()
+            req_gen = self._published_gen
         method_upper = method.upper() if isinstance(method, str) else str(method).upper()
 
         max_retries = kwargs.pop("max_retries", None)
@@ -867,11 +1667,6 @@ class RnetSession:
                 run_proxy.check(parsed_origin.hostname, sys._getframe(1))
             except Exception:  # nosec B110 - the proxy check only warns, it must never fail a request
                 pass
-        if parsed_origin.scheme and parsed_origin.netloc:
-            self._origins.add(f"{parsed_origin.scheme}://{parsed_origin.netloc}")
-
-        kwargs.setdefault("allow_redirects", True)
-
         if not self.verify:
             kwargs.setdefault("verify", False)
 
@@ -891,19 +1686,21 @@ class RnetSession:
         if rnet_method is None:
             raise ValueError(f"Unsupported HTTP method: {method}")
 
-        # Convert headers to standard dict once to resolve PyO3 CaseInsensitiveDict rejection.
-        if kwargs.get("headers") is not None:
-            kwargs["headers"] = dict(kwargs["headers"])
+        # rnet merges client defaults back into each hop. Keep removable headers on the request.
+        headers = CaseInsensitiveDict({k: v for k, v in self.headers.items() if k.lower() in _REDIRECT_HEADERS})
+        headers.update(kwargs.get("headers") or {})
+        if headers or kwargs.get("headers") is not None:
+            kwargs["headers"] = dict(headers)
 
         if method_upper not in self.allowed_methods:
-            return self.absorb_cookies(RnetResponse(client.request(rnet_method, url, **kwargs)))
+            return self._request_once(client, req_gen, rnet_method, method_upper, url, **kwargs)
 
         last_exception: Optional[Exception] = None
         response: Optional[RnetResponse] = None
 
         for attempt in range(max_retries + 1):
             try:
-                response = self.absorb_cookies(RnetResponse(client.request(rnet_method, url, **kwargs)))
+                response = self._request_once(client, req_gen, rnet_method, method_upper, url, **kwargs)
 
                 if config.debug_requests:
                     parsed_url = urlparse(url)
