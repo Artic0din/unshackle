@@ -158,6 +158,17 @@ def test_make_remote_service_passes_only_cli_options(remote_config, monkeypatch)
     assert built["args"][5]["EXAMPLE"] == {"x": 1}
 
 
+def test_make_remote_auth_only_service(remote_config):
+    original_name = remote_service.RemoteService.__name__
+    remote = remote_service.make_remote_service(None, "srv", "EXAMPLE", None, {}, auth_only=True)
+    try:
+        assert remote.auth_only
+        assert remote.title == ""
+    finally:
+        remote_service.RemoteService.__name__ = original_name
+        remote.session.close()
+
+
 def test_a_service_option_named_like_a_dl_value_passes_only_nested():
     info = {"cli_params": [{"kind": "option", "name": "profile"}]}
     assert remote_service.remote_service_params(info, {"service_params": {"profile": "QC"}}) == {"profile": "QC"}
@@ -184,24 +195,36 @@ def test_a_geofenced_remote_service_gets_its_first_allowed_region_as_proxy(monke
     assert handlers.geofence_proxy({}, fenced) == {}
 
 
-def test_remote_login_shows_structured_approval_instead_of_server_logs(monkeypatch):
+PAIRING_NOTICE = ApprovalNotice("Approve this device", "https://tv.example/pair", "ABCD", "2030-01-01T00:00:00Z")
+
+
+@pytest.mark.parametrize("outcome", ["authenticated", "failed", "invalid", "timeout", "cancelled"])
+def test_remote_login_shows_structured_approval_instead_of_server_logs(monkeypatch, outcome):
     import logging
     from threading import Lock
 
     shown = []
     monkeypatch.setattr(remote_service, "show_approval", shown.append)
-    monkeypatch.setattr(remote_service.time, "sleep", lambda s: None)
-    logs = iter([["+ IP Region: CA"], []])
-    responses = iter(
-        [
-            {"status": "authenticating", "approval": {"message": "Approve this device"}},
-            {"status": "authenticated"},
-        ]
+    clock = [0]
+    monkeypatch.setattr(
+        remote_service,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda _: clock.__setitem__(0, clock[0] + 1)),
     )
+    logs = iter([["+ IP Region: CA"], []])
 
     class Client:
+        polls = 0
+
         def get(self, endpoint):
-            return next(responses)
+            self.polls += 1
+            if self.polls == 1:
+                return {"status": "authenticating", "approval": PAIRING_NOTICE.to_dict()}
+            if outcome == "cancelled":
+                raise KeyboardInterrupt
+            if outcome == "invalid":
+                return {"status": "authenticating", "approval": {"message": "Pair", "extra": "private-fixture"}}
+            return {"status": outcome}
 
         def get_optional(self, endpoint):
             batch = next(logs, [])
@@ -215,8 +238,20 @@ def test_remote_login_shows_structured_approval_instead_of_server_logs(monkeypat
     remote.log, remote._cdm_sessions, remote._input_bridge = logging.getLogger("test"), {}, None
     monkeypatch.setattr(remote_service.RemoteService, "local_cdm", None)
 
-    remote.poll_auth_completion(poll_interval=0)
-    assert shown == [ApprovalNotice("Approve this device"), None]
+    if outcome == "authenticated":
+        remote.poll_auth_completion(poll_interval=0)
+    elif outcome == "cancelled":
+        with pytest.raises(KeyboardInterrupt):
+            remote.poll_auth_completion(poll_interval=0)
+    else:
+        error = {
+            "invalid": "^Remote auth returned an invalid approval payload$",
+            "timeout": "timed out",
+            "failed": "auth failed",
+        }[outcome]
+        with pytest.raises(remote_service.RemoteError, match=error):
+            remote.poll_auth_completion(poll_interval=0, timeout=1 if outcome == "timeout" else 600)
+    assert shown == [PAIRING_NOTICE, None]
     assert remote.auth_approval is None
 
 
@@ -436,6 +471,7 @@ def test_headless_remote_login_routes_approval_through_its_session_bridge(monkey
     remote.poll_auth_completion(poll_interval=0)
 
     assert bridge.get_pending_approval() is None
+    assert remote._approval_owner is None and remote._approval_sent is None
 
 
 class _PollsThenStops:
@@ -480,8 +516,8 @@ def test_a_post_login_approval_is_shown_and_cleared_while_requests_run(monkeypat
     responses = iter(
         [
             {"status": "authenticated"},
-            {"status": "authenticated", "approval": {"message": "Approve this device again"}},
-            {"status": "authenticated", "approval": {"message": "Approve this device again"}},
+            {"status": "authenticated", "approval": PAIRING_NOTICE.to_dict()},
+            {"status": "authenticated", "approval": PAIRING_NOTICE.to_dict()},
             {"status": "authenticated"},
         ]
     )
@@ -489,7 +525,7 @@ def test_a_post_login_approval_is_shown_and_cleared_while_requests_run(monkeypat
 
     remote.poll_cdm_calls(_PollsThenStops(4), interval=0)
 
-    assert shown == [ApprovalNotice("Approve this device again"), None]
+    assert shown == [PAIRING_NOTICE, None]
     assert remote.auth_approval is None
 
 
@@ -842,6 +878,7 @@ def test_a_session_without_a_local_cdm_leaves_the_prompt_endpoint_alone_while_no
 
 def test_a_session_with_a_local_cdm_still_polls_for_cdm_calls_every_half_second(monkeypatch):
     svc, session = _authenticated_session(monkeypatch, local_cdm=SimpleNamespace(is_playready=False))
+    session.approval = None
     session.release_first_prompt.set()
     svc.authenticate()
 
@@ -860,7 +897,7 @@ async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):
         pass
 
     login = handlers.RemoteLogin("owner", "srv", "OTHER", "show", Remote())
-    login.bridge.set_approval(ApprovalNotice("Approve this device"))
+    login.bridge.set_approval(PAIRING_NOTICE)
     login.bridge.set_authentication_observation(
         AuthenticationObservation(AuthenticationState.WAITING, method="pairing")
     )
@@ -876,7 +913,7 @@ async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):
 
     listed = json.loads((await handlers.remote_logins_handler(None)).text)["logins"]
     assert listed[0]["prompt"] == "Enter the code sent to your email"
-    assert listed[0]["approval"] == {"message": "Approve this device"}
+    assert listed[0]["approval"] == PAIRING_NOTICE.to_dict()
     assert listed[0]["authentication"] == {"state": "waiting", "method": "pairing"}
 
     caller["key"] = "someone-else"
@@ -892,3 +929,34 @@ async def test_a_remote_login_prompt_waits_for_its_owners_answer(monkeypatch):
     with pytest.raises(APIError) as e:
         await handlers.remote_login_input_handler(login.id, {"response": "again"}, None)
     assert e.value.error_code == APIErrorCode.CONFLICT
+
+
+@pytest.mark.parametrize(
+    "title, mode, error",
+    [
+        ("movie", True, ValueError),
+        (0, True, ValueError),
+        (None, False, ValueError),
+        (" ", False, ValueError),
+        ("movie", 1, TypeError),
+    ],
+)
+def test_remote_title_validation_precedes_connection(title, mode, error):
+    with pytest.raises(error):
+        remote_service.RemoteService(None, "EXAMPLE", title, "", "", {}, auth_only=mode)
+
+
+def test_auth_only_remote_requests_no_title(monkeypatch):
+    svc, session = _authenticated_session(monkeypatch, None)
+    svc.ctx.parent = SimpleNamespace(params={"no_proxy": True})
+    svc.auth_only = True
+    sent = []
+    monkeypatch.setattr(
+        session,
+        "post",
+        lambda url, timeout, json: sent.append(json) or _FakeResponse({"session_id": "sid", "status": "authenticated"}),
+    )
+    svc.authenticate()
+    assert sent[0]["auth_only"] and "title_id" not in sent[0]
+    with pytest.raises(RuntimeError, match="Auth-only remote sessions"):
+        svc.get_titles()

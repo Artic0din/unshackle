@@ -10,6 +10,7 @@ This changelog is automatically generated using [git-cliff](https://git-cliff.or
 
 ### Features
 
+- Added provider login without a title and device approval prompts that can show a URL, code and expiry time.
 - *auth*: Expose redacted authentication lifecycle observations
 
 ### Bug Fixes

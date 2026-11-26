@@ -1,5 +1,6 @@
 import logging
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -95,3 +96,38 @@ def test_shows_structured_approval_and_clears_it(monkeypatch, check, expectation
     with expectation:
         Service.wait_for_approval(_service(), "enter code", check, timeout=0.05, interval=0.01)
     assert approvals == [ApprovalNotice("enter code"), None]
+
+
+def test_structured_approval_reaches_bridge_then_clears(caplog):
+    bridge = InputBridge()
+    result = Service.wait_for_approval(_service(bridge), "Pair", bridge.get_pending_approval, 1, code="AB")
+    assert result == ApprovalNotice("Pair", code="AB")
+    assert bridge.get_pending_approval() is None
+    with caplog.at_level(logging.INFO), pytest.raises(ValueError, match="Invalid approval code"):
+        Service.wait_for_approval(_service(bridge), "Pair", lambda: True, 1, code="\t")
+    assert caplog.messages == []
+
+
+@pytest.mark.parametrize("expires_at", ["2030-01-01T00:00:00Z", datetime(2030, 1, 1, tzinfo=timezone.utc)])
+@pytest.mark.parametrize("local", [True, False])
+def test_full_approval_round_trip(monkeypatch, caplog, expires_at, local):
+    bridge = None if local else InputBridge()
+    shown = []
+    monkeypatch.setattr(console, "_approval_handler", shown.append)
+    expected = ApprovalNotice("Pair", "https://tv.example/pair", "ABCD", "2030-01-01T00:00:00Z")
+    with caplog.at_level(logging.INFO, logger="test"):
+        result = Service.wait_for_approval(
+            _service(bridge),
+            expected.message,
+            (lambda: shown[-1]) if local else bridge.get_pending_approval,
+            timeout=1,
+            url=expected.url,
+            code=expected.code,
+            expires_at=expires_at,
+        )
+    assert result == expected
+    if local:
+        assert shown == [expected, None]
+    else:
+        assert bridge.get_pending_approval() is None
+    assert caplog.messages == ["Waiting for device approval"]

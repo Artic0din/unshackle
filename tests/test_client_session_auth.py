@@ -323,7 +323,11 @@ def _run_session(monkeypatch, tmp_path, data, answer, server_account=False, fail
 
     async def run():
         resp = await handlers.session_create_handler({"service": "EXAMPLE", "title_id": "t", **data})
-        session = get_session_store().peek(json.loads(resp.body)["session_id"])
+        created = json.loads(resp.body)
+        info = json.loads((await handlers.session_info_handler(created["session_id"])).body)
+        assert ("auth_only" in created) == data.get("auth_only", False)
+        assert ("auth_only" in info) == data.get("auth_only", False)
+        session = get_session_store().peek(created["session_id"])
         for _ in range(200):
             if answer is not None and session.input_bridge.status == AuthStatus.PENDING_INPUT:
                 await handlers.session_prompt_post_handler({"response": answer}, session.session_id)
@@ -413,3 +417,186 @@ def test_login_that_outlives_its_session_leaves_no_cache(monkeypatch, tmp_path):
     session = asyncio.run(run())
     assert session.auth_status.value == "authenticated"
     assert not (tmp_path / session.cache_tag).exists()
+
+
+@pytest.mark.parametrize(
+    "data, error",
+    [
+        ([], "service"),
+        ({"service": 1}, "service"),
+        ({"service": " "}, "service"),
+        ({"service": "EX", "auth_only": 1}, "boolean"),
+        ({"service": "EX", "auth_only": None}, "boolean"),
+        *[
+            ({"service": "EX", "auth_only": True, "title_id": title}, "must not provide")
+            for title in (False, 123, "movie")
+        ],
+        *[
+            ({"service": "EX", "title_id": title}, "required parameter: title_id")
+            for title in (None, False, 123, " ", "")
+        ],
+    ],
+)
+async def test_title_mode_validation(data, error):
+    from unshackle.core.api import handlers
+
+    with pytest.raises(handlers.APIError, match=error):
+        await handlers.session_create_handler(data)
+
+
+@pytest.mark.parametrize("mode, client_owned", [("full", False), ("remote_only", True)])
+@pytest.mark.parametrize("title", [None, "", "  "])
+def test_title_free_login_ownership(monkeypatch, tmp_path, mode, client_owned, title):
+    from unshackle.core.api.stats import stats
+
+    monkeypatch.setattr(stats, "mode", mode)
+    session = _run_session(monkeypatch, tmp_path, {"auth_only": True, "title_id": title}, None)
+    assert session.auth_only and session.summary()["auth_only"]
+    assert session.client_auth is client_owned
+    assert bool(session.cache_tag) is client_owned
+
+
+def test_auth_only_click_contract():
+    from types import SimpleNamespace
+
+    import click
+
+    from unshackle.core.api import handlers
+
+    @click.command()
+    @click.argument("title")
+    def titled(title):
+        return title
+
+    @click.command()
+    def untitled():
+        return "ready"
+
+    ctx = click.Context(click.Command("dl"))
+    ctx.params["auth_only"] = True
+    assert handlers.instantiate_service(ctx, SimpleNamespace(cli=titled), "ignored") == ""
+    assert handlers.instantiate_service(ctx, SimpleNamespace(cli=untitled), "ignored") == "ready"
+
+
+async def test_full_auth_only_requires_local_account_grant(monkeypatch):
+    from unshackle.core.api import handlers
+    from unshackle.core.api.stats import stats
+
+    monkeypatch.setattr(stats, "mode", "full")
+    monkeypatch.setattr(handlers, "server_account_spec", lambda *_: None)
+    monkeypatch.setattr(handlers, "server_accounts_allowed", lambda *_: False)
+    monkeypatch.setattr(handlers, "validate_service", lambda *_: "EX")
+    monkeypatch.setattr(handlers, "resolve_handler_proxy", lambda *_: (None, []))
+    with pytest.raises(handlers.APIError, match="Server account access is required"):
+        await handlers.session_create_handler({"service": "EX", "auth_only": True})
+
+
+def test_local_account_blocks_client_proxy(monkeypatch):
+    from unshackle.core.api import handlers
+    from unshackle.core.api.stats import stats
+
+    monkeypatch.setattr(stats, "mode", "full")
+    monkeypatch.setattr(handlers, "server_account_spec", lambda *_: None)
+    with pytest.raises(handlers.APIError, match="not a proxy URI"):
+        handlers.resolve_handler_proxy({"auth_only": True, "proxy": "https://proxy.example"}, "EX")
+
+
+def test_configured_account_without_grant_uses_client_cache(monkeypatch, tmp_path):
+    from unshackle.core.api import handlers
+    from unshackle.core.api.stats import stats
+
+    monkeypatch.setattr(stats, "mode", "full")
+    monkeypatch.setattr(handlers, "server_account_spec", lambda *_: True)
+    session = _run_session(monkeypatch, tmp_path, {"auth_only": True, "title_id": None}, None)
+    assert session.client_auth and session.cache_tag.startswith("_sessions/")
+
+
+@pytest.mark.parametrize(
+    "configured,granted,reload",
+    [
+        (False, False, False),
+        (False, True, False),
+        (True, False, False),
+        (True, True, False),
+        (True, False, True),
+        (False, True, True),
+    ],
+)
+async def test_auth_only_login_ownership(monkeypatch, tmp_path, configured, granted, reload):
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from unshackle.commands.dl import dl
+    from unshackle.core.api import handlers
+    from unshackle.core.api.session_store import get_session_store
+    from unshackle.core.api.stats import stats
+
+    serve = {"users": {"client": {"server_accounts": granted}}, "server_accounts": {"EX": True} if configured else {}}
+    request = SimpleNamespace(headers={"X-Secret-Key": "client"}, remote=None, app={})
+    data = {"service": "EX", "auth_only": True, "no_proxy": True}
+    monkeypatch.setattr(handlers.config, "serve", serve)
+    monkeypatch.setattr(stats, "mode", "full")
+    monkeypatch.setattr(handlers, "validate_service", lambda *_: "EX")
+    if not configured and not granted:
+        monkeypatch.setattr(
+            handlers, "resolve_handler_proxy", lambda *args: pytest.fail("proxy evaluated before grant")
+        )
+        with pytest.raises(handlers.APIError, match="Server account access is required") as exc:
+            await handlers.session_create_handler(data, request)
+        assert exc.value.error_code == handlers.APIErrorCode.FORBIDDEN
+        return
+
+    original = handlers.resolve_handler_proxy
+
+    def resolve(*args, **kwargs):
+        if reload:
+            handlers.config.serve = {**serve, "server_accounts": {} if configured else {"EX": True}}
+        return original(*args, **kwargs)
+
+    received = []
+    provider = SimpleNamespace(
+        cache=None, log=None, authenticate=lambda cookies, credential: received.append(credential)
+    )
+    monkeypatch.setattr(handlers, "resolve_handler_proxy", resolve)
+    monkeypatch.setattr(handlers.config.directories, "cache", tmp_path)
+    monkeypatch.setattr(handlers, "server_region", lambda: None)
+    monkeypatch.setattr(handlers, "load_service_yaml", lambda *_: {})
+    monkeypatch.setattr(handlers, "load_full_cdm", lambda *_: None)
+    monkeypatch.setattr(handlers.Services, "load", lambda *_: type(provider))
+    monkeypatch.setattr(handlers, "instantiate_service", lambda *_: provider)
+    monkeypatch.setattr(dl, "get_cookie_jar", lambda *_: None)
+    monkeypatch.setattr(dl, "get_credentials", lambda *_: "server fixture")
+    response = await handlers.session_create_handler(data, request)
+    assert response.status == 200, response.text
+    session_id = json.loads(response.body)["session_id"]
+    store = get_session_store()
+    try:
+        await asyncio.gather(*handlers._auth_tasks)
+        session = store.peek(session_id)
+        assert received == ["server fixture" if granted else None]
+        assert session.client_auth is (not granted)
+        assert (session.cache_tag is None) is granted
+        assert session.server_account == ("default" if configured and granted else None)
+        assert session.service_instance.cache.service_tag == (
+            "_accounts/EX/default" if configured and granted else "EX" if granted else session.cache_tag
+        )
+    finally:
+        await store.delete(session_id)
+
+
+async def test_create_event_includes_auth_only():
+    from unshackle.core.api.events import bus
+    from unshackle.core.api.session_store import SessionStore
+
+    store = SessionStore()
+    seq = bus.seq
+    entry = await store.create("EX", object(), auth_only=True)
+    (event,) = [
+        event["data"]
+        for event in bus.since(seq)
+        if event["event"] == "session"
+        and event["data"]["action"] == "create"
+        and event["data"]["id"] == entry.session_id
+    ]
+    assert event["auth_only"] is True

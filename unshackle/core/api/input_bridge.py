@@ -171,6 +171,8 @@ class InputBridge:
 
     def set_approval(self, approval: Optional[ApprovalNotice]) -> None:
         """Set or clear the approval owned by this remote session."""
+        if approval is not None and not isinstance(approval, ApprovalNotice):
+            raise TypeError("Expected an ApprovalNotice")
         with self._lock:
             if approval is not None and self._is_ended():
                 raise RuntimeError("Remote session is no longer active")

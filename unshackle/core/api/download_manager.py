@@ -790,6 +790,8 @@ class DownloadQueueManager:
         elif job.status == JobStatus.DOWNLOADING:
             job.cancel_event.set()
             job.status = JobStatus.CANCELLED
+            job.approval = None
+            job.input_prompt = None
             log.info(f"Signaled cancellation for downloading job {sanitize_log(job_id)}")
 
             task = self._active_downloads.get(job_id)
@@ -1122,7 +1124,10 @@ class DownloadQueueManager:
                                 job.notice = progress_data["notice"]
                             if "approval" in progress_data:
                                 raw_approval = progress_data["approval"]
-                                job.approval = ApprovalNotice.from_dict(raw_approval) if raw_approval else None
+                                try:
+                                    job.approval = ApprovalNotice.from_dict(raw_approval) if raw_approval else None
+                                except (TypeError, ValueError):
+                                    job.approval = None
                             if "authentication" in progress_data:
                                 raw_authentication = progress_data["authentication"]
                                 job.authentication = (

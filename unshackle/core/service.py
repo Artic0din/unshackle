@@ -3,9 +3,10 @@ import time
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
+from datetime import datetime
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Sequence, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Final, Optional, Sequence, TypeVar, Union
 
 if TYPE_CHECKING:
     from unshackle.core.api.input_bridge import InputBridge
@@ -18,7 +19,7 @@ from requests.adapters import HTTPAdapter, Retry
 from rich.padding import Padding
 from rich.rule import Rule
 
-from unshackle.core.approval import ApprovalNotice
+from unshackle.core.approval import ApprovalNotice, format_approval_expiry
 from unshackle.core.authentication import AuthenticationObservation, AuthenticationState, AuthMethod
 from unshackle.core.cacher import Cacher
 from unshackle.core.config import config
@@ -51,6 +52,7 @@ from unshackle.core.utils.redact import mask_proxy
 # Default (connect, read) timeout for the requests path, mirroring RnetSession's
 # connect_timeout / read_timeout construction defaults. A per-request timeout= wins.
 DEFAULT_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
+AUTH_ONLY_TITLE: Final[str] = ""
 
 
 class TimeoutSession(requests.Session):
@@ -486,7 +488,15 @@ class Service(metaclass=ABCMeta):
             publish_authentication(observation)
 
     def wait_for_approval(
-        self, message: str, check: Callable[[], Optional[T]], timeout: float, interval: float = 3.0
+        self,
+        message: str,
+        check: Callable[[], Optional[T]],
+        timeout: float,
+        interval: float = 3.0,
+        *,
+        url: Optional[str] = None,
+        code: Optional[str] = None,
+        expires_at: Optional[Union[str, datetime]] = None,
     ) -> T:
         """Show ``message``, then call ``check`` until it returns a value.
 
@@ -495,8 +505,8 @@ class Service(metaclass=ABCMeta):
         seconds. Raises TimeoutError after ``timeout`` seconds, and RuntimeError when the
         remote session no longer exists. Approval text is transient and never logged.
         """
+        approval = ApprovalNotice(message, url, code, format_approval_expiry(expires_at))
         self.log.info("Waiting for device approval")
-        approval = ApprovalNotice(message)
         if self._input_bridge is not None:
             self._input_bridge.set_approval(approval)
         else:
@@ -797,4 +807,4 @@ class Service(metaclass=ABCMeta):
         """
 
 
-__all__ = ("Service", "TrackRequest")
+__all__ = ("AUTH_ONLY_TITLE", "Service", "TrackRequest")

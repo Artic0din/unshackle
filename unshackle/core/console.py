@@ -590,6 +590,14 @@ def approval_handler_active() -> bool:
     return _approval_handler is not None
 
 
+def format_approval(approval: ApprovalNotice) -> Text:
+    lines = [approval.message]
+    for label, value in (("URL", approval.url), ("Code", approval.code), ("Expires", approval.expires_at)):
+        if value is not None:
+            lines.append(f"{label}: {value}")
+    return Text("\n".join(lines), style="text")
+
+
 def show_approval(approval: Optional[ApprovalNotice]) -> None:
     """Show an approval transiently, or clear the active approval with ``None``."""
     global _approval_live
@@ -609,7 +617,7 @@ def show_approval(approval: Optional[ApprovalNotice]) -> None:
             return
         if not console.is_terminal:
             raise RuntimeError("Device approval requires an interactive terminal or an approval handler")
-        _approval_renderables[owner] = Padding(Text(approval.message, style="text"), (0, 5))
+        _approval_renderables[owner] = Padding(format_approval(approval), (0, 5))
         renderable = Group(*_approval_renderables.values())
         if _approval_live is None:
             live = SyncLive(renderable, console=console, transient=True)

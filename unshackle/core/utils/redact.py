@@ -17,7 +17,7 @@ URL_USERINFO_RE = re.compile(r"(?<=://)[^/@]+@")
 # secret-bearing query parameters in URLs that end up in free text; the affixes catch
 # access_token=, client_secret=, api-key= - "_" is a word character, so \b alone misses them
 SENSITIVE_QUERY_PARAM_RE = re.compile(
-    r"(?i)(?<![\w-])([\w-]*(?:password|passwd|pwd|token|api[_-]?key|secret)[\w-]*|auth)=([^&#\s\"']+)"
+    r"(?i)(?<![\w-])([\w-]*(?:password|passwd|pwd|token|api[_-]?key|secret)[\w-]*|device[_-]?(?:code|id|secret)|auth(?:orization)?)=([^&#;\s\"']+)"
 )
 
 

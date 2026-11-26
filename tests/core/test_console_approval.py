@@ -60,3 +60,11 @@ def test_concurrent_approvals_clear_only_their_own_display(monkeypatch) -> None:
         for thread in threads:
             thread.join(timeout=5)
     assert displays[0].stopped
+
+
+def test_format_approval_fields_as_literal_text():
+    notice = ApprovalNotice("[bold]", "https://tv.example", "AB", "2030-01-01T00:00:00Z")
+    assert (
+        console.format_approval(notice).plain
+        == "[bold]\nURL: https://tv.example\nCode: AB\nExpires: 2030-01-01T00:00:00Z"
+    )

@@ -62,6 +62,7 @@ class SessionEntry:
     actions: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=500))
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_accessed: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    auth_only: bool = False
 
     def touch(self) -> None:
         """Update last_accessed timestamp."""
@@ -97,6 +98,7 @@ class SessionEntry:
             "auth_status": self.auth_status.value,
             "auth_error": self.auth_error,
             "server_account": self.server_account,
+            **({"auth_only": True} if self.auth_only else {}),
             "server_cdm": self.server_cdm,
             "server_cdm_max_height": self.server_cdm_max_height,
             "log_seq": self.log_buffer.last_seq if self.log_buffer else 0,
@@ -162,6 +164,7 @@ class SessionStore:
         owner_key: Optional[str] = None,
         creator_ip: Optional[str] = None,
         server_account: Optional[str] = None,
+        auth_only: bool = False,
     ) -> SessionEntry:
         """Make a new remote session with an authenticated service instance."""
         evicted_tag: Optional[str] = None
@@ -186,6 +189,7 @@ class SessionStore:
                 owner_key=owner_key,
                 creator_ip=creator_ip,
                 server_account=server_account,
+                auth_only=auth_only,
             )
             self._sessions[session_id] = entry
             _publish("create", entry)
