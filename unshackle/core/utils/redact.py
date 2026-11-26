@@ -18,13 +18,6 @@ URL_USERINFO_RE = re.compile(r"(?<=://)[^/@]+@")
 # access_token=, client_secret=, api-key= - "_" is a word character, so \b alone misses them
 _SENSITIVE_PARAM_KEY = r"(?<![\w-])([\w-]*(?:password|passwd|pwd|token|api[_-]?key|secret)[\w-]*|device[_-]?(?:code|id|secret)|auth(?:orization)?)="
 SENSITIVE_QUERY_PARAM_RE = re.compile(_SENSITIVE_PARAM_KEY + r"([^&#\s\"']+)", re.IGNORECASE)
-URL_SENSITIVE_PARAM_RE = re.compile(_SENSITIVE_PARAM_KEY + r"([^&#;\s\"']+)", re.IGNORECASE)
-# A free-text credential can itself contain a URL. Match its assignment before scanning its value.
-_URL_OR_SENSITIVE_PARAM_RE = re.compile(
-    r"""(?P<url>(?:(?<![=\w])[a-z][a-z0-9+.-]*://|(?<![=:\w/])//|(?<![=:\w/])/[^\s"'?#]*[?#])[^\s"']+)|"""
-    + SENSITIVE_QUERY_PARAM_RE.pattern,
-    re.IGNORECASE,
-)
 
 
 def redact_text(text: Optional[str], secrets: Iterable[str] = ()) -> Optional[str]:
@@ -36,12 +29,7 @@ def redact_text(text: Optional[str], secrets: Iterable[str] = ()) -> Optional[st
         return text
     text = URL_USERINFO_RE.sub(f"{REDACTED}@", text)
 
-    def mask_match(match: re.Match[str]) -> str:
-        if match["url"] is not None:
-            return URL_SENSITIVE_PARAM_RE.sub(rf"\1={REDACTED}", match["url"])
-        return SENSITIVE_QUERY_PARAM_RE.sub(rf"\1={REDACTED}", match[0])
-
-    text = _URL_OR_SENSITIVE_PARAM_RE.sub(mask_match, text)
+    text = SENSITIVE_QUERY_PARAM_RE.sub(rf"\1={REDACTED}", text)
     # longest first so substrings don't survive partial replacement
     for secret in sorted({s for s in secrets if isinstance(s, str) and s}, key=len, reverse=True):
         text = text.replace(secret, REDACTED)

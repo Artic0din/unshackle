@@ -6,8 +6,10 @@ import functools
 import inspect
 import json
 import logging
+import os
 import re
 import socket
+import tempfile
 import threading
 import time
 import uuid
@@ -17,7 +19,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date as date_
 from functools import partial
-from http.cookiejar import CookieJar
+from http.cookiejar import CookieJar, MozillaCookieJar
 from pathlib import Path
 from typing import AbstractSet, Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Union, cast
 from urllib.parse import urlsplit
@@ -3893,6 +3895,86 @@ def uses_local_server_auth(normalized_service: str, *, auth_only: bool, server_a
     )
 
 
+_COOKIE_SAVE_LOCK = threading.Lock()
+
+
+_CookieState = tuple[Optional[str], Optional[int], bool, bool, bool, tuple[tuple[str, Any], ...]]
+
+
+def _cookie_key(cookie: Any) -> tuple[str, str, str]:
+    return cookie.domain or "", cookie.path or "/", cookie.name
+
+
+def _cookie_state(cookie: Any) -> _CookieState:
+    return (
+        cookie.value,
+        cookie.expires,
+        bool(cookie.secure),
+        bool(getattr(cookie, "domain_specified", False)),
+        bool(getattr(cookie, "domain_initial_dot", False)),
+        tuple(sorted((getattr(cookie, "_rest", None) or {}).items())),
+    )
+
+
+def snapshot_auth_cookies(raw_cookies: Any) -> dict[tuple[str, str, str], _CookieState]:
+    if raw_cookies is None:
+        return {}
+    if isinstance(raw_cookies, dict):
+        return dict(raw_cookies)
+    jar = getattr(raw_cookies, "jar", raw_cookies)
+    try:
+        return {
+            _cookie_key(c): _cookie_state(c) for c in jar if getattr(c, "name", None) and getattr(c, "domain", None)
+        }
+    except TypeError:
+        return {}
+
+
+def save_local_auth_cookies(
+    normalized_service: str, profile: Optional[str], service_instance: Any, initial_cookies: Optional[Any] = None
+) -> None:
+    from unshackle.commands.dl import dl
+
+    raw_cookies = getattr(getattr(service_instance, "session", None), "cookies", None)
+    if raw_cookies is None:
+        return
+    jar = getattr(raw_cookies, "jar", raw_cookies)
+    try:
+        cookies = [c for c in jar if getattr(c, "name", None) and getattr(c, "domain", None)]
+    except TypeError:
+        return
+    if not cookies:
+        return
+
+    baseline = snapshot_auth_cookies(initial_cookies)
+    with _COOKIE_SAVE_LOCK:
+        cookie_file = dl.get_cookie_path(normalized_service, profile)
+        target = dl.load_cookie_file(cookie_file) if cookie_file is not None and cookie_file.exists() else None
+        target_keys = {_cookie_key(c) for c in target} if target is not None else set()
+        updates = [
+            c for c in cookies if _cookie_state(c) != baseline.get(_cookie_key(c)) or _cookie_key(c) not in target_keys
+        ]
+        if not updates:
+            return
+        if cookie_file is None:
+            cookie_file = config.directories.cookies / normalized_service / f"{profile or 'default'}.txt"
+            cookie_file.parent.mkdir(parents=True, exist_ok=True)
+        if target is None:
+            target = MozillaCookieJar(cookie_file)
+        for cookie in updates:
+            target.set_cookie(cookie)
+        with tempfile.NamedTemporaryFile(
+            dir=cookie_file.parent, prefix=f".{cookie_file.name}.", suffix=".tmp", delete=False
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            target.save(filename=str(tmp_path), ignore_discard=True, ignore_expires=True)
+            os.replace(tmp_path, cookie_file)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+
 def create_service_instance(
     normalized_service: str,
     title_id: str,
@@ -4155,7 +4237,12 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
 
         async def run_auth() -> None:
             try:
+                initial_cookies = snapshot_auth_cookies(cookies) if local_server_auth else None
                 await asyncio.to_thread(service_instance.authenticate, cookies, credential)
+                if local_server_auth:
+                    await asyncio.to_thread(
+                        save_local_auth_cookies, normalized_service, profile, service_instance, initial_cookies
+                    )
                 if not persistent_server_cache:
                     session.client_auth = True
                 session.auth_status = AuthStatus.AUTHENTICATED

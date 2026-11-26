@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
+from time import perf_counter
 
 import pytest
 
 from unshackle.core.approval import ApprovalNotice, format_approval_expiry
-from unshackle.core.utils.redact import REDACTED, redact_secrets
+from unshackle.core.utils.redact import REDACTED, redact_secrets, redact_text
 
 
 def test_notice_round_trip() -> None:
@@ -95,26 +96,32 @@ def test_invalid_offset(offset: str) -> None:
 
 @pytest.mark.parametrize("key", ["device_code", "device_secret", "authorization"])
 def test_device_error_redaction(key: str) -> None:
-
     assert redact_secrets(f"failure {key}=Bearer123;suffix") == f"failure {key}={REDACTED}"
     assert redact_secrets("failure password=abc;def") == f"failure password={REDACTED}"
-    assert (
-        redact_secrets(f"https://tv.example/?{key}=Bearer123;next=public")
-        == f"https://tv.example/?{key}={REDACTED};next=public"
-    )
+    assert redact_secrets(f"https://tv.example/?{key}=Bearer123;next=public") == f"https://tv.example/?{key}={REDACTED}"
     url = "https://tv.example/?a=1;"
     assert redact_secrets(f"{url}{key}=Bearer123") == f"{url}{key}={REDACTED}"
 
 
 @pytest.mark.parametrize("url", ["socks5://host/?token=", "see //tv.example/?token=", "/pair?device_code="])
-def test_url_redaction_preserves_delimiter(url: str) -> None:
-    assert redact_secrets(url + "secret;next=public") == url + "***;next=public"
+def test_url_redaction_masks_semicolon_suffix(url: str) -> None:
+    assert redact_secrets(url + "secret;next=public") == url + "***"
 
 
 def test_url_userinfo_and_free_text_redaction() -> None:
-    assert (
-        redact_secrets("socks5://user:pass@host/?token=secret;next=public")
-        == "socks5://***@host/?token=***;next=public"
-    )
+    assert redact_secrets("socks5://user:pass@host/?token=secret;next=public") == "socks5://***@host/?token=***"
     for value in ("abc;def", "https://host;tail"):
         assert redact_secrets("password=" + value) == "password=***"
+
+
+def test_url_password_redaction() -> None:
+    assert (
+        redact_text("https://provider.example/login?password=abc;def") == "https://provider.example/login?password=***"
+    )
+
+
+def test_slash_heavy_redaction() -> None:
+    path = "./" * 5000
+    start = perf_counter()
+    assert redact_text(path + "token=abc") == path + "token=***"
+    assert perf_counter() - start < 0.1

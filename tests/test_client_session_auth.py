@@ -289,7 +289,7 @@ def test_safe_inflate_rejects_non_str_via_isinstance():
             guard(bad)
 
 
-def _run_session(monkeypatch, tmp_path, data, answer, server_account=False, fail=False):
+def _run_session(monkeypatch, tmp_path, data, answer, server_account=False, fail=False, provider=None):
     """Run session_create_handler with a service that prompts during login; return the settled remote session."""
     import asyncio
     import base64
@@ -318,7 +318,9 @@ def _run_session(monkeypatch, tmp_path, data, answer, server_account=False, fail
     monkeypatch.setattr(handlers, "server_account_for", lambda *args: server_account)
     monkeypatch.setattr(handlers, "next_server_profile", lambda *args: None)
     monkeypatch.setattr(handlers.Services, "load", lambda service: PromptingService)
-    monkeypatch.setattr(handlers, "create_service_instance", lambda *a, **k: (PromptingService(), None, None))
+    monkeypatch.setattr(
+        handlers, "create_service_instance", lambda *a, **k: (provider or PromptingService(), None, None)
+    )
     if data.get("cache") == "tokens":
         data["cache"] = {"tokens_default": base64.b64encode(zlib.compress(b"{}")).decode("ascii")}
 
@@ -608,3 +610,219 @@ async def test_create_event_includes_auth_only():
         and event["data"]["id"] == entry.session_id
     ]
     assert event["auth_only"] is True
+
+
+@pytest.mark.parametrize(
+    "mode, profile, existing",
+    [
+        ("full", None, False),
+        ("full", "family", False),
+        ("full", "family", True),
+        ("remote_only", "family", False),
+        ("remote_only", "family", True),
+    ],
+)
+@pytest.mark.parametrize("backend", ["requests", "rnet", "empty"])
+def test_auth_only_cookie_persistence(monkeypatch, tmp_path, mode, profile, existing, backend):
+    from http.cookiejar import CookieJar
+
+    from unshackle.commands.dl import dl
+    from unshackle.core.api import handlers
+    from unshackle.core.api.input_bridge import AuthStatus
+    from unshackle.core.api.session_store import get_session_store
+    from unshackle.core.api.stats import stats
+    from unshackle.core.session import RnetSession
+
+    class CookieService:
+        cache = None
+        log = None
+
+        def __init__(self):
+            self.session = RnetSession() if backend == "rnet" else requests.Session()
+
+        def authenticate(self, cookies, credential):
+            jar = CookieJar()
+            if backend != "empty":
+                jar.set_cookie(requests.cookies.create_cookie("sid", "refreshed", domain=".example.com"))
+            self.session.cookies.update(jar)
+
+    cookie_root = tmp_path / "cookies"
+    monkeypatch.setattr(handlers.config.directories, "cookies", cookie_root)
+    monkeypatch.setattr(stats, "mode", mode)
+    monkeypatch.setattr(handlers, "server_account_spec", lambda *_: None)
+    direct = cookie_root / "EXAMPLE.txt"
+    if existing:
+        cookie_root.mkdir()
+        direct.write_text(".example.com\tTRUE\t/\tFALSE\t0\tsid\tprevious\n")
+    before = direct.read_bytes() if existing else None
+    provider = CookieService()
+    original_save = handlers.os.replace
+    saved_states = []
+
+    def save(path, cookies):
+        original_save(path, cookies)
+        entry = next(entry for entry in get_session_store().list() if entry.service_instance is provider)
+        saved_states.append((entry.auth_status, entry.input_bridge.status))
+
+    monkeypatch.setattr(handlers.os, "replace", save)
+    session = _run_session(
+        monkeypatch, tmp_path, {"auth_only": True, "title_id": None, "profile": profile}, None, provider=provider
+    )
+    assert session.auth_status == AuthStatus.AUTHENTICATED
+    assert get_session_store().peek(session.session_id) is None
+    if mode == "remote_only" or backend == "empty":
+        assert saved_states == []
+        assert list(cookie_root.rglob("*")) == ([direct] if existing else [])
+        if existing:
+            assert direct.read_bytes() == before
+    else:
+        assert len(saved_states) == 1
+        assert AuthStatus.AUTHENTICATED not in saved_states[0]
+        assert dl.get_cookie_path("EXAMPLE", profile) == (
+            direct if existing else cookie_root / "EXAMPLE" / f"{profile or 'default'}.txt"
+        )
+        assert [(c.name, c.value) for c in dl.get_cookie_jar("EXAMPLE", profile)] == [("sid", "refreshed")]
+
+
+def test_overlapping_cookie_saves(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from unshackle.commands.dl import dl
+    from unshackle.core.api import handlers
+
+    monkeypatch.setattr(handlers.config.directories, "cookies", tmp_path)
+    ready = Barrier(2)
+
+    def persist(name):
+        session = requests.Session()
+        session.cookies.set(name, name, domain=".example.com")
+        ready.wait(timeout=5)
+        handlers.save_local_auth_cookies("EXAMPLE", None, SimpleNamespace(session=session))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(persist, ["first", "second"]))
+    assert {c.name for c in dl.load_cookie_file(tmp_path / "EXAMPLE/default.txt")} == {"first", "second"}
+
+
+def test_failed_cookie_save_preserves_original(monkeypatch, tmp_path):
+    from http.cookiejar import MozillaCookieJar
+    from pathlib import Path
+
+    from unshackle.core.api import handlers
+
+    monkeypatch.setattr(handlers.config.directories, "cookies", tmp_path)
+    path = tmp_path / "EXAMPLE.txt"
+    original = b".example.com\tTRUE\t/\tFALSE\t0\tsid\tprevious\n"
+    path.write_bytes(original)
+    session = requests.Session()
+    session.cookies.set("sid", "new", domain=".example.com")
+
+    def fail(self, filename=None, **kwargs):
+        Path(filename or self.filename).write_bytes(b"partial")
+        raise OSError("write failed")
+
+    monkeypatch.setattr(MozillaCookieJar, "save", fail)
+    with pytest.raises(OSError, match="write failed"):
+        handlers.save_local_auth_cookies("EXAMPLE", None, SimpleNamespace(session=session))
+    assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.fixture
+def shared_cookie_file(monkeypatch, tmp_path):
+    from unshackle.core.config import config
+
+    monkeypatch.setattr(config.directories, "cookies", tmp_path)
+    path = tmp_path / "EXAMPLE.txt"
+    path.write_text("".join(f".example.com\tTRUE\t/\tFALSE\t0\t{name}\told_{name}\n" for name in ("a", "b")))
+    return path
+
+
+@pytest.mark.parametrize("backend", ["requests", "rnet"])
+def test_shared_cookie_refresh(shared_cookie_file, backend, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from unshackle.commands.dl import dl
+    from unshackle.core.api import handlers
+    from unshackle.core.session import RnetSession
+
+    initial = dl.get_cookie_jar("EXAMPLE", None)
+    baseline = handlers.snapshot_auth_cookies(initial)
+    for name in ("a", "b"):
+        client = requests.Session() if backend == "requests" else RnetSession()
+        client.cookies.update(initial)
+        changes = requests.cookies.RequestsCookieJar()
+        changes.set(name, f"new_{name}", domain=".example.com")
+        client.cookies.update(changes)
+        handlers.save_local_auth_cookies("EXAMPLE", None, SimpleNamespace(session=client), baseline)
+    assert {c.name: c.value for c in dl.load_cookie_file(shared_cookie_file)} == {"a": "new_a", "b": "new_b"}
+    replace = Mock(wraps=handlers.os.replace)
+    monkeypatch.setattr(handlers.os, "replace", replace)
+    baseline = handlers.snapshot_auth_cookies(client.cookies)
+    handlers.save_local_auth_cookies("EXAMPLE", None, SimpleNamespace(session=client), baseline)
+    replace.assert_not_called()
+    shared_cookie_file.unlink()
+    handlers.save_local_auth_cookies("EXAMPLE", None, SimpleNamespace(session=client), baseline)
+    assert {c.name: c.value for c in dl.get_cookie_jar("EXAMPLE", None)} == {"a": "old_a", "b": "new_b"}
+
+
+@pytest.mark.asyncio
+async def test_overlapping_auth_only_refresh(shared_cookie_file, monkeypatch):
+    import asyncio
+    import json
+    from threading import Event
+
+    from unshackle.commands.dl import dl
+    from unshackle.core.api import handlers
+    from unshackle.core.api.input_bridge import AuthStatus
+    from unshackle.core.api.session_store import get_session_store
+    from unshackle.core.api.stats import stats
+
+    class Provider:
+        cache = None
+        log = None
+
+        def __init__(self, name):
+            self.name = name
+            self.session = requests.Session()
+            self.ready = Event()
+            self.release = Event()
+
+        def authenticate(self, cookies, credential):
+            self.session.cookies.update(cookies)
+            self.ready.set()
+            assert self.release.wait(10)
+            self.session.cookies.set(self.name, f"new_{self.name}", domain=".example.com")
+
+    providers = [Provider(name) for name in ("a", "b")]
+    instances = iter(providers)
+    monkeypatch.setattr(stats, "mode", "full")
+    monkeypatch.setattr(handlers, "validate_service", lambda service, request=None: service)
+    monkeypatch.setattr(handlers, "resolve_handler_proxy", lambda *args: (None, []))
+    monkeypatch.setattr(handlers, "server_account_for", lambda *args: False)
+    monkeypatch.setattr(handlers, "server_account_spec", lambda *args: None)
+    monkeypatch.setattr(handlers.Services, "load", lambda service: Provider)
+    monkeypatch.setattr(
+        handlers, "create_service_instance", lambda *a, **k: (next(instances), dl.get_cookie_jar("EXAMPLE", None), None)
+    )
+    store = get_session_store()
+    ids = []
+    try:
+        for provider in providers:
+            response = await handlers.session_create_handler({"service": "EXAMPLE", "auth_only": True})
+            ids.append(json.loads(response.body)["session_id"])
+            assert await asyncio.to_thread(provider.ready.wait, 5)
+        for provider, session_id in zip(providers, ids):
+            provider.release.set()
+            async with asyncio.timeout(5):
+                while store.peek(session_id).auth_status == AuthStatus.AUTHENTICATING:
+                    await asyncio.sleep(0.01)
+            assert store.peek(session_id).auth_status == AuthStatus.AUTHENTICATED
+        assert {c.name: c.value for c in dl.get_cookie_jar("EXAMPLE", None)} == {"a": "new_a", "b": "new_b"}
+    finally:
+        for provider in providers:
+            provider.release.set()
+        for session_id in ids:
+            await store.delete(session_id)
