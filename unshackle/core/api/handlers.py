@@ -345,10 +345,9 @@ def instantiate_service(
                 param = inspect.signature(callback).parameters.get("title")
             except (TypeError, ValueError):
                 param = None
-            if (
-                param is None
-                or param.default is not inspect.Parameter.empty
-                or param.kind not in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            if param is None or param.kind not in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
             ):
                 return parent_ctx.invoke(service_module.cli, **extras)
         title = AUTH_ONLY_TITLE
@@ -4790,7 +4789,7 @@ def resolve_handler_proxy(
     data: Dict[str, Any],
     normalized_service: str,
     request: Optional[web.Request] = None,
-    local_server_auth: Optional[bool] = None,
+    local_server_auth: bool = False,
     server_account: Optional[bool] = None,
 ) -> tuple[Optional[str], list]:
     """Get the proxy and the proxy providers for an API request.
@@ -4813,10 +4812,6 @@ def resolve_handler_proxy(
     if proxy_param and re.match(r"^(https?://|socks|controld://|tunnel:)", str(proxy_param)):
         if server_account is None:
             server_account = server_account_for(request, normalized_service)
-        if local_server_auth is None:
-            local_server_auth = uses_local_server_auth(
-                normalized_service, auth_only=data.get("auth_only") is True, server_account=server_account
-            )
         if server_account or local_server_auth:
             raise APIError(
                 APIErrorCode.FORBIDDEN,

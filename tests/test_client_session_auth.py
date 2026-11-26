@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 import requests
@@ -465,16 +466,21 @@ def test_auth_only_click_contract():
 
     @click.command()
     @click.argument("title")
-    def titled(title):
+    def titled(title: str) -> str:
         return title
 
     @click.command()
-    def untitled():
+    def untitled() -> str:
         return "ready"
+
+    @click.command()
+    def optional_titled(title: Optional[str] = None) -> Optional[str]:
+        return title
 
     ctx = click.Context(click.Command("dl"))
     ctx.params["auth_only"] = True
     assert handlers.instantiate_service(ctx, SimpleNamespace(cli=titled), "ignored") == ""
+    assert handlers.instantiate_service(ctx, SimpleNamespace(cli=optional_titled), "ignored") == ""
     assert handlers.instantiate_service(ctx, SimpleNamespace(cli=untitled), "ignored") == "ready"
 
 
@@ -497,8 +503,10 @@ def test_local_account_blocks_client_proxy(monkeypatch):
 
     monkeypatch.setattr(stats, "mode", "full")
     monkeypatch.setattr(handlers, "server_account_spec", lambda *_: None)
+    data = {"auth_only": True, "proxy": "https://proxy.example"}
     with pytest.raises(handlers.APIError, match="not a proxy URI"):
-        handlers.resolve_handler_proxy({"auth_only": True, "proxy": "https://proxy.example"}, "EX")
+        handlers.resolve_handler_proxy(data, "EX", local_server_auth=True)
+    assert handlers.resolve_handler_proxy(data, "EX") == ("https://proxy.example", [])
 
 
 def test_configured_account_without_grant_uses_client_cache(monkeypatch, tmp_path):
