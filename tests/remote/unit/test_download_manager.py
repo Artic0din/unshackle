@@ -6,6 +6,7 @@ cleanup/serialize); they do not exercise the actual subprocess download path.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -64,7 +65,7 @@ def test_terminal_history_never_persists_approval(
     history = tmp_path / "history.jsonl"
     monkeypatch.setattr(download_manager, "history_path", lambda: history)
     job = manager.create_job("EXAMPLE", "t")
-    job.approval = ApprovalNotice("Enter pair code ABCD")
+    job.approval = ApprovalNotice("Pair", code="ABCD", url="https://tv.example")
     job.status = JobStatus.COMPLETED
 
     download_manager.record_job_history(job)
@@ -92,9 +93,15 @@ def test_cancel_completed_job_returns_false(manager: DownloadQueueManager) -> No
 
 
 def test_cancel_downloading_job_signals(manager: DownloadQueueManager) -> None:
+    from unshackle.core.approval import ApprovalNotice
+
     job = manager.create_job("EXAMPLE", "t")
     job.status = JobStatus.DOWNLOADING
+    job.approval = ApprovalNotice("Pair")
+    job.input_prompt = "Enter code"
     assert manager.cancel_job(job.job_id) is True
+    assert job.approval is None
+    assert job.input_prompt is None
     assert job.status is JobStatus.CANCELLED
     assert job.cancel_event.is_set()
 
@@ -839,8 +846,9 @@ async def test_a_repeated_prompt_reaches_an_event_listener(
     assert job.input_prompt is None
 
 
+@pytest.mark.parametrize("valid", [True, False])
 async def test_an_approval_reaches_the_job_and_an_event_listener(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manager: DownloadQueueManager
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manager: DownloadQueueManager, valid: bool
 ) -> None:
     """The job carries structured approval while the worker waits, and drops it at the end."""
     import asyncio
@@ -851,16 +859,20 @@ async def test_an_approval_reaches_the_job_and_an_event_listener(
     bus.history.clear()
 
     worker = tmp_path / "worker.py"
+    expected = {"message": "Pair", "code": "ABCD", "url": "https://tv.example"} if valid else None
+    emit = (
+        'show_approval(ApprovalNotice("Pair", code="ABCD", url="https://tv.example"))'
+        if valid
+        else 'progress({"approval": {"message": "Pair", "unknown": "ABCD"}})'
+    )
     # The prompt holds the worker open until the test has seen the notice.
     source = FAKE_PROMPT_WORKER.replace(
         "from unshackle.core.console import prompt_user",
-        "from unshackle.core.approval import ApprovalNotice\n"
-        "from unshackle.core.console import prompt_user, show_approval",
+        "from unshackle.core.approval import ApprovalNotice\nfrom unshackle.core.console import prompt_user, show_approval",
     ).replace(
         'answers = [prompt_user("Enter OTP"), prompt_user("Enter OTP")]',
-        'show_approval(ApprovalNotice("Enter pair code ABCD"))\nanswers = [prompt_user("Continue")]',
+        f'{emit}\nanswers = [prompt_user("Continue")]',
     )
-    assert source.count("show_approval") == 2, "FAKE_PROMPT_WORKER changed; update the replacements"
     worker.write_text(source, encoding="utf-8")
     spawn = asyncio.create_subprocess_exec
 
@@ -876,8 +888,8 @@ async def test_an_approval_reaches_the_job_and_an_event_listener(
         while True:
             event = await events.get()
             if event and event["data"]["input_prompt"]:
-                assert event["data"]["approval"] == {"message": "Enter pair code ABCD"}
-                assert job.to_dict()["approval"] == {"message": "Enter pair code ABCD"}
+                assert event["data"]["approval"] == expected
+                assert job.to_dict()["approval"] == expected
                 assert manager.submit_input(job, "ok") is True
                 return
 
@@ -888,7 +900,7 @@ async def test_an_approval_reaches_the_job_and_an_event_listener(
 
 
 async def test_approval_is_not_sent_to_global_event_listeners(
-    monkeypatch: pytest.MonkeyPatch, manager: DownloadQueueManager
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manager: DownloadQueueManager
 ) -> None:
     from unshackle.core.api import download_manager
     from unshackle.core.api.events import EventBus
@@ -901,14 +913,21 @@ async def test_approval_is_not_sent_to_global_event_listeners(
     await dashboard_events.get()
     job_events = manager.subscribe(job.job_id)
 
-    job.approval = ApprovalNotice("Enter pair code ABCD")
+    job.approval = ApprovalNotice("Pair", code="ABCD", url="https://tv.example")
     manager.publish(job, "progress")
 
     dashboard_event = await dashboard_events.get()
     job_event = await job_events.get()
     assert "approval" not in dashboard_event["data"]
     assert "ABCD" not in repr(dashboard_event)
-    assert job_event["data"]["approval"] == {"message": "Enter pair code ABCD"}
+    assert job_event["data"]["approval"] == {"message": "Pair", "code": "ABCD", "url": "https://tv.example"}
+    history = tmp_path / "history.jsonl"
+    monkeypatch.setattr(download_manager, "history_path", lambda: history)
+    job.status = JobStatus.FAILED
+    download_manager.record_job_history(job)
+    saved = json.loads(history.read_text())
+    assert "approval" not in saved
+    assert "ABCD" not in str(saved) and "tv.example" not in str(saved)
 
 
 async def test_authentication_observation_is_job_owned_and_terminal_history_is_redacted(

@@ -1,34 +1,52 @@
 from __future__ import annotations
 
+import io
 import threading
+from functools import partial
 from types import SimpleNamespace
-from typing import Any
+from typing import Optional
+
+import pytest
+from rich.console import Console, Group
 
 from unshackle.core import console
 from unshackle.core.approval import ApprovalNotice
 
 
-def test_concurrent_approvals_clear_only_their_own_display(monkeypatch) -> None:
-    displays: list[Any] = []
+class _FakeLive:
+    def __init__(
+        self,
+        displays: list[_FakeLive],
+        renderable: Group,
+        *_args: object,
+        transient: Optional[bool] = None,
+        **_kwargs: object,
+    ) -> None:
+        self.renderable = renderable
+        self.transient = transient
+        self.stopped = False
+        displays.append(self)
 
-    class FakeLive:
-        def __init__(self, renderable, *_args, **_kwargs) -> None:
-            self.renderable = renderable
-            self.stopped = False
-            displays.append(self)
+    def start(self) -> None:
+        return None
 
-        def start(self) -> None:
-            return None
+    def update(self, renderable: Group, **_kwargs: object) -> None:
+        self.renderable = renderable
 
-        def update(self, renderable, **_kwargs) -> None:
-            self.renderable = renderable
+    def stop(self) -> None:
+        self.stopped = True
 
-        def stop(self) -> None:
-            self.stopped = True
 
-    monkeypatch.setattr(console, "SyncLive", FakeLive)
+@pytest.fixture
+def displays(monkeypatch: pytest.MonkeyPatch) -> list[_FakeLive]:
+    displays: list[_FakeLive] = []
+    monkeypatch.setattr(console, "SyncLive", partial(_FakeLive, displays))
     monkeypatch.setattr(console, "console", SimpleNamespace(is_terminal=True))
     monkeypatch.setattr(console, "_approval_handler", None)
+    return displays
+
+
+def test_concurrent_approvals_clear_only_their_own_display(displays: list[_FakeLive]) -> None:
     shown = threading.Barrier(3)
     clear = [threading.Event(), threading.Event()]
     cleared = [threading.Event(), threading.Event()]
@@ -60,3 +78,28 @@ def test_concurrent_approvals_clear_only_their_own_display(monkeypatch) -> None:
         for thread in threads:
             thread.join(timeout=5)
     assert displays[0].stopped
+
+
+def test_show_approval_fields_as_literal_text(displays: list[_FakeLive]) -> None:
+    notice = ApprovalNotice("[bold]", "https://tv.example", "AB", "2030-01-01T00:00:00Z")
+    try:
+        console.show_approval(notice)
+        assert displays[0].transient is True
+        output = io.StringIO()
+        Console(file=output, force_terminal=False, width=120).print(displays[0].renderable)
+        rendered = output.getvalue()
+        for field in ("[bold]", "URL: https://tv.example", "Code: AB", "Expires: 2030-01-01T00:00:00Z"):
+            assert field in rendered
+    finally:
+        console.show_approval(None)
+    assert displays[0].stopped
+    assert console._approval_live is None
+    assert not console._approval_renderables
+
+
+def test_format_approval_fields_as_literal_text() -> None:
+    notice = ApprovalNotice("[bold]", "https://tv.example", "AB", "2030-01-01T00:00:00Z")
+    assert (
+        console.format_approval(notice).plain
+        == "[bold]\nURL: https://tv.example\nCode: AB\nExpires: 2030-01-01T00:00:00Z"
+    )

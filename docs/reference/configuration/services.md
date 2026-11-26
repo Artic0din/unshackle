@@ -295,10 +295,13 @@ positive whole number, stops the server at startup, because the alternative is a
 silently gets no limit. The rate limit never applies to the dashboard key, and never to
 `/api/health`.
 
-`server_accounts` lists, per service, the accounts the server lends to remote sessions. A remote
-session for a listed service ignores the credentials, cookies, and cache the client sends and
-uses one of the server's own profiles from `credentials`. For a service that is not listed the
-server never uses its own accounts: a client that sends nothing authenticates with nothing.
+`server_accounts` lists the accounts the server lends to remote sessions for each service.
+For a listed service, a client with the `server_accounts` grant uses a server profile and its cache.
+
+For an unlisted service, a client can open a session without a title by sending `{"auth_only": true}` to `POST /api/session/create`.
+In full mode (the default or `api_only`), this session loads the server's local profile cookies and credentials and uses the persistent cache for that service.
+The calling API key needs the `server_accounts` grant for the service or the request returns `403 FORBIDDEN`.
+For an unlisted service, title-bound sessions and all sessions on a `--remote-only` server use client-isolated credentials, cookies, and cache.
 
 ```yaml
 credentials:

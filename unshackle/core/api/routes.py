@@ -1909,7 +1909,7 @@ async def session_create(request: web.Request) -> web.Response:
     Make a remote session.
     ---
     summary: Make remote session
-    description: Authenticate with a service, get titles, tracks, and chapters in one call
+    description: Start provider authentication with a title or an auth-only session
     requestBody:
       required: true
       content:
@@ -1919,12 +1919,17 @@ async def session_create(request: web.Request) -> web.Response:
             additionalProperties: true
             required:
               - service
-              - title_id
             properties:
               service:
                 type: string
+              auth_only:
+                type: boolean
+                default: false
+                description: Start authentication without selecting a title
               title_id:
                 type: string
+                nullable: true
+                description: Required for title-bound sessions and must be absent or blank for auth-only sessions
               credentials:
                 type: object
                 additionalProperties: true
@@ -2038,6 +2043,9 @@ async def session_create(request: web.Request) -> web.Response:
             schema:
               type: object
               properties:
+                auth_only:
+                  type: boolean
+                  description: Present and true for an auth-only session
                 session_id:
                   type: string
                 service:
@@ -2071,7 +2079,8 @@ async def session_create(request: web.Request) -> web.Response:
       '403':
         description: |
           SERVER_CDM_CAPPED when `quality` asks for more than the server CDM limit and the client
-          reported no local CDM
+          reported no local CDM.
+          FORBIDDEN when local login requires server account access or a server login receives a client proxy URI.
       '401':
         description: Authentication failed
     """
@@ -2147,7 +2156,7 @@ async def session_titles(request: web.Request) -> web.Response:
     Get titles for an authenticated remote session.
     ---
     summary: Get titles
-    description: Fetch titles from the authenticated remote session
+    description: Fetch titles from a title-bound session. Auth-only sessions return HTTP 400.
     parameters:
       - name: session_id
         in: path
@@ -2160,6 +2169,8 @@ async def session_titles(request: web.Request) -> web.Response:
           List of titles.
           After 30 s the route sends 200 and a newline every 30 s. A failure after that time
           arrives as the error body with status 200.
+      '400':
+        description: INVALID_INPUT for an auth-only session
       '404':
         description: Remote session not found
     """
@@ -2205,6 +2216,8 @@ async def session_tracks(request: web.Request) -> web.Response:
           Tracks and chapters for the title.
           After 30 s the route sends 200 and a newline every 30 s. A failure after that time
           arrives as the error body with status 200.
+      '400':
+        description: INVALID_INPUT for an auth-only session
       '404':
         description: Remote session or title not found
     """
@@ -2479,7 +2492,7 @@ async def session_info(request: web.Request) -> web.Response:
     Get remote session info.
     ---
     summary: Remote session info
-    description: Make sure that the remote session is valid, and get metadata
+    description: Get session metadata including auth_only when true
     parameters:
       - name: session_id
         in: path
@@ -2552,6 +2565,12 @@ async def session_prompt_get(request: web.Request) -> web.Response:
                   description: Transient device-approval data; never retain it in logs or history
                   properties:
                     message:
+                      type: string
+                    url:
+                      type: string
+                    code:
+                      type: string
+                    expires_at:
                       type: string
                 authentication:
                   type: object
@@ -3384,6 +3403,12 @@ async def remote_logins(request: web.Request) -> web.Response:
                         nullable: true
                         properties:
                           message:
+                            type: string
+                          url:
+                            type: string
+                          code:
+                            type: string
+                          expires_at:
                             type: string
                       authentication:
                         type: object

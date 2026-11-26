@@ -977,7 +977,21 @@ the newlines must go out at once.
 
 ### `POST /api/session/create`
 
-Make a remote session for a service and title. Authentication runs asynchronously in the background. This call returns immediately with `status: "authenticating"`, and you then poll the prompt endpoint. The body accepts `service` and `title_id` (both required). It also accepts a broad set of optional keys, because the body allows `additionalProperties`. These are `credentials` (`{username, password, extra?}`), `cookies` (base64 of zlib-compressed Netscape cookie file), `proxy`, `no_proxy`, `profile`, `cache` (map of forwarded cache files, keyed by the file path relative to the service cache directory with `/` separators and no `.json` suffix, so a nested key such as `session_web/<sha1>` lands in a subdirectory), `client_region`, `proxy_region`, `cdm_type`, `range_`, `vcodec`, `quality`, `best_available`, `dl_params`, `client`, and any service CLI options. `proxy_region` is the country code the client resolved `proxy` from; the server matches it against its own accounts. `client` is a freeform object the dashboard shows as sent (the CLI puts `version`, `code_hash`, `platform` and a redacted `argv` in it); the server ignores it above 4096 bytes of JSON.
+Supply `service` and a nonblank `title_id` to create a title-bound session.
+For login alone, send `auth_only` as the boolean `true` and omit `title_id`.
+The response and session info include `auth_only` only when true.
+The server starts authentication in the background and returns immediately with `status: "authenticating"`.
+Poll the prompt endpoint until authentication completes.
+Its transient `approval` contains `message` and optional `url`, `code` and `expires_at`.
+The server clears the approval when the wait ends and excludes it from history.
+See [remote sessions](remote-sessions.md) for the provider CLI contract and cache ownership.
+
+The request allows `additionalProperties`.
+Optional fields include `credentials` (`{username, password, extra?}`), `cookies` (base64 of zlib-compressed Netscape cookie file), `proxy`, `no_proxy`, `profile`, `cache` (map of forwarded cache files, keyed by the file path relative to the service cache directory with `/` separators and no `.json` suffix, so a nested key such as `session_web/<sha1>` lands in a subdirectory), `client_region`, `proxy_region`, `cdm_type`, `range_`, `vcodec`, `quality`, `best_available`, `dl_params`, `client`, and any service CLI options.
+`proxy_region` is the country code the client resolved `proxy` from.
+The server matches that country code against its own accounts.
+`client` is a freeform object the dashboard shows as sent (the CLI puts `version`, `code_hash`, `platform` and a redacted `argv` in it).
+The server ignores `client` above 4096 bytes of JSON.
 
 `dl_params` is an object with the `dl` track selection: `lang`, `v_lang`, `a_lang` and `s_lang` (arrays of language strings), `acodec` (an array of audio codec names or `dl -a` aliases such as `ddp`), and `forced_subs` and `exact_lang` (booleans). The service reads these values from `ctx.parent.params`. The server uses the `dl` default for each absent or malformed value, and drops an unknown codec name.
 
@@ -996,13 +1010,21 @@ The `proxy` value must be a full proxy URI, unless the operator gives your API k
     }
     ```
 
-`server_account` is `true` when the server authenticated with one of its own accounts (`serve.server_accounts`). Otherwise the server uses only what the client sent, and never falls back to its own credentials. When the login succeeds and the remote session does not use a server account, the login belongs to the client, and the client gets cookies, auth headers, and the remote session cache back. A remote session on the server's device is the exception: the client gets its cookies back, but no auth headers and no cache. For a server-account remote session the tracks and segments responses carry no cookies and no auth headers. The server also drops secret-looking keys from track data, and the cache stays on the server. A server-account service also refuses a client proxy URI, because the server's login would pass through it.
+`server_account` is `true` when the server authenticated with one of its own accounts (`serve.server_accounts`).
+A full-mode auth-only login can also use the local service profile and retain its cache on the server.
+Other sessions use only the login material the client sent.
+When a client-managed login succeeds, the login belongs to the client, and the client gets cookies, auth headers, and the remote session cache back.
+When the session uses the server's device, the client receives only its cookies.
+For a server-account remote session the tracks and segments responses carry no cookies and no auth headers.
+The server also drops secret-looking keys from track data, and the cache stays on the server.
+A server-account service also refuses a client proxy URI, because the server's login would pass through it.
 
 | Status | Error code | Meaning |
 | --- | --- | --- |
 | `200` | - | Session created; authentication in progress. |
-| `400` | `INVALID_INPUT` | Missing `service` or `title_id`. |
+| `400` | `INVALID_INPUT` | Missing service or invalid combination of `auth_only` and `title_id`. |
 | `400` | `INVALID_SERVICE` | Unknown or disallowed service. |
+| `403` | `FORBIDDEN` | The local login requires server account access, or a server login received a client proxy URI. |
 
 ### `GET /api/session/{session_id}/prompt`
 
@@ -1092,6 +1114,7 @@ A slow answer arrives as a [slow response](#slow-responses).
     }
     ```
 
+Auth-only sessions return `400 INVALID_INPUT`.
 Requires an authenticated remote session. Otherwise it returns `404 SESSION_NOT_FOUND`.
 
 ### `POST /api/session/{session_id}/tracks`
@@ -1122,7 +1145,7 @@ Get tracks and chapters for a specific title within the remote session. Body: `{
 | Status | Error code | Meaning |
 | --- | --- | --- |
 | `200` | - | Tracks returned. |
-| `400` | `INVALID_INPUT` | Missing or unknown `title_id`. |
+| `400` | `INVALID_INPUT` | Missing or unknown `title_id`, or an auth-only session. |
 | `404` | `SESSION_NOT_FOUND` | No such session. |
 
 ### `POST /api/session/{session_id}/segments`
@@ -1270,7 +1293,9 @@ Return remote session metadata and validity.
 
 ### `DELETE /api/session/{session_id}`
 
-Tear down a remote session. The server cancels its input bridge, harvests any updated cache files, and deletes the remote session and its cache directory.
+The server cancels the input bridge and closes the session.
+It returns updated client cache files and removes the temporary session cache.
+It keeps the persistent cache for server logins.
 
 === "Response `200`"
 

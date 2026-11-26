@@ -250,3 +250,18 @@ async def test_prompt_handler_returns_the_approval_of_an_authenticated_session(m
 
     bridge.set_approval(None)
     assert "approval" not in loads((await handlers.session_prompt_get_handler("session-a")).text)
+
+
+def test_bridge_rejects_untyped_approval():
+    bridge = InputBridge()
+    with pytest.raises(TypeError, match="^Expected an ApprovalNotice$"):
+        bridge.set_approval({"message": "Pair"})
+    assert bridge.get_pending_approval() is None
+
+
+def test_approval_serializer_checks_bridge_payloads():
+    from unshackle.core.api import handlers
+
+    assert handlers.serialize_approval({"message": "Pair", "code": " AB "}) == {"message": "Pair", "code": "AB"}
+    with pytest.raises(handlers.APIError, match="Invalid approval payload"):
+        handlers.serialize_approval({})

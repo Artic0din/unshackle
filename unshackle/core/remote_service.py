@@ -59,6 +59,7 @@ from unshackle.core.drm import BlowfishStripe, cbcs, real_kids
 from unshackle.core.manifests.snapshot import match_track, restore
 from unshackle.core.proxies.resolve import is_loopback
 from unshackle.core.search_result import SearchResult
+from unshackle.core.service import AUTH_ONLY_TITLE
 from unshackle.core.session import MAX_BACKOFF
 from unshackle.core.titles import Title_T, Titles_T, remap_titles
 from unshackle.core.titles.availability import availability_metadata
@@ -815,19 +816,33 @@ def remote_service_params(info: dict, data: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in service_options(data, names).items() if v is not None and v is not False}
 
 
+def remote_session_title(title: Optional[str], auth_only: bool) -> str:
+    if not isinstance(auth_only, bool):
+        raise TypeError("auth_only must be a boolean")
+    if auth_only:
+        if title is not None and (not isinstance(title, str) or title.strip()):
+            raise ValueError("auth_only sessions must not provide title_id")
+        return AUTH_ONLY_TITLE
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("Missing required parameter: title_id")
+    return title
+
+
 def make_remote_service(
     ctx: click.Context,
     server_name: Optional[str],
     service_tag: str,
-    title_id: str,
+    title_id: Optional[str],
     data: Dict[str, Any],
     apply_overrides: bool = True,
+    auth_only: bool = False,
 ) -> "RemoteService":
     """A RemoteService for one ``remote_services`` server, set up the way ``dl --remote`` sets one up.
 
     ``apply_overrides`` False keeps the per-service ``remote_services.<name>.services`` overrides out of this
     process's global config.
     """
+    title_id = remote_session_title(title_id, auth_only)
     url, api_key, live = resolve_server(server_name)
     own = ci_get(live, service_tag)
     # resolve_server hands back the live config dict; concurrent requests for other tags must not share it
@@ -843,7 +858,9 @@ def make_remote_service(
     services_config["_client_config"] = info.get("client_config")
     services_config["_anonymous_search"] = info.get("anonymous_search")
     params = remote_service_params(info, data)
-    return RemoteService(ctx, service_tag, title_id, url, api_key, services_config, service_params=params)
+    return RemoteService(
+        ctx, service_tag, title_id, url, api_key, services_config, service_params=params, auth_only=auth_only
+    )
 
 
 def load_credentials_for_transport(service_tag: str, profile: Optional[str]) -> Optional[Dict[str, str]]:
@@ -1083,6 +1100,7 @@ class RemoteService:
     ANIME: bool = False
     DAILY: bool = False
     server_cdm_type: str = "widevine"
+    auth_only: bool = False
     # the poller or login that set the shared approval, and so the only one that clears it
     _approval_owner: Optional[object] = None
     # what this service last passed to an approval handler, which cannot be read back like a bridge
@@ -1092,17 +1110,19 @@ class RemoteService:
         self,
         ctx: click.Context,
         service_tag: str,
-        title_id: str,
+        title_id: Optional[str],
         server_url: str,
         api_key: str,
         services_config: dict,
         service_params: Optional[Dict[str, Any]] = None,
+        auth_only: bool = False,
     ) -> None:
+        self.title_id = remote_session_title(title_id, auth_only)
+        self.auth_only = auth_only
         self.__class__.__name__ = service_tag
         console.print(Padding(Rule(f"[rule.text]Service: {service_tag} (Remote)"), (1, 2)))
 
         self.service_tag = service_tag
-        self.title_id = title_id
         self.client = RemoteClient(
             server_url, api_key, services_config.get("_auth_headers"), services_config.get("_timeout")
         )
@@ -1271,7 +1291,11 @@ class RemoteService:
         proxy = self.ctx.parent.params.get("proxy") if self.ctx.parent else None
         no_proxy = self.ctx.parent.params.get("no_proxy", False) if self.ctx.parent else False
 
-        create_data: Dict[str, Any] = {"service": self.service_tag, "title_id": self.title_id}
+        create_data: Dict[str, Any] = {"service": self.service_tag}
+        if self.auth_only:
+            create_data["auth_only"] = True
+        else:
+            create_data["title_id"] = self.title_id
 
         if self._server_accounts is None:
             create_data.update(self.client_login(profile))
@@ -1590,24 +1614,25 @@ class RemoteService:
         try:
             with recovering():
                 self.authenticate(credential=self.credential)
-                listing = self.client.get(f"/api/session/{self._session_id}/titles").get("titles", [])
-                fresh_titles = [build_title(t, self.service_tag, self.title_id) for t in listing]
-                for old in self._titles or []:
-                    same = [t for t in fresh_titles if title_key(t) == title_key(old)]
-                    if len(same) == 1 and str(same[0].id) != str(old.id):
-                        self._title_alias[str(old.id)] = str(same[0].id)
-                title = self._current_title
-                if title is not None:
-                    held = self._tracks_by_title.pop(str(title.id), None)
-                    try:
-                        fresh = list(self.get_tracks(title))
-                    finally:  # dl holds the old track objects, so the cache keeps them
-                        if held is not None:
-                            self._tracks_by_title[str(title.id)] = held
-                    for track in held or []:
-                        match = match_track(track, fresh)
-                        if match is not None and str(match.id) != str(track.id):
-                            self._track_alias[str(track.id)] = str(match.id)
+                if not self.auth_only:
+                    listing = self.client.get(f"/api/session/{self._session_id}/titles").get("titles", [])
+                    fresh_titles = [build_title(t, self.service_tag, self.title_id) for t in listing]
+                    for old in self._titles or []:
+                        same = [t for t in fresh_titles if title_key(t) == title_key(old)]
+                        if len(same) == 1 and str(same[0].id) != str(old.id):
+                            self._title_alias[str(old.id)] = str(same[0].id)
+                    title = self._current_title
+                    if title is not None:
+                        held = self._tracks_by_title.pop(str(title.id), None)
+                        try:
+                            fresh = list(self.get_tracks(title))
+                        finally:  # dl holds the old track objects, so the cache keeps them
+                            if held is not None:
+                                self._tracks_by_title[str(title.id)] = held
+                        for track in held or []:
+                            match = match_track(track, fresh)
+                            if match is not None and str(match.id) != str(track.id):
+                                self._track_alias[str(track.id)] = str(match.id)
         except RemoteError as e:
             if e.kind not in RECOVERABLE:
                 raise
@@ -1701,12 +1726,8 @@ class RemoteService:
             raise
         finally:
             self.close_cdm_sessions()
-            if self.auth_approval is not None:
-                self.auth_approval = None
-                if self._input_bridge is not None:
-                    self._input_bridge.set_approval(None)
-                else:
-                    show_approval(None)
+            if self.auth_approval is not None or self._approval_owner is self:
+                self.auth_approval = self.relay_approval(None, self.auth_approval, self)
             current = getattr(self, "auth_observation", None)
             if current is not None and not current.is_terminal:
                 self.set_authentication_observation(None)
@@ -1890,6 +1911,8 @@ class RemoteService:
         sessions.clear()
 
     def get_titles(self) -> Titles_T:
+        if self.auth_only:
+            raise RuntimeError("Auth-only remote sessions do not support title discovery")
         if self._titles is not None:
             return self._titles
         try:

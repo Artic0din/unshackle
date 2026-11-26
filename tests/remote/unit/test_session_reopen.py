@@ -152,3 +152,14 @@ def test_closing_a_session_the_server_lost_logs_no_error(caplog):
 
     assert service._session_id is None
     assert not [r for r in caplog.records if r.levelname in ("WARNING", "ERROR")]
+
+
+def test_auth_only_reopen_stops_after_authentication(monkeypatch):
+    service = make_service()
+    service.auth_only = True
+    monkeypatch.setattr(service, "wait_for_server", lambda accepting: True)
+    calls = []
+    monkeypatch.setattr(service, "authenticate", lambda **kwargs: calls.append("login"))
+    monkeypatch.setattr(service.client, "get", lambda *_: pytest.fail("requested titles"))
+    assert service.reopen()
+    assert calls == ["login"]

@@ -401,3 +401,117 @@ def test_setup_routes_with_docs_registers_each_route_once() -> None:
     routes_with_docs = Counter((r.method, r.resource.canonical) for r in documented.router.routes())
     assert max(routes_with_docs.values()) == 1
     assert {route for route in routes_with_docs if not route[1].startswith("/api/docs")} == set(collect_paths(plain))
+
+
+@pytest.mark.parametrize(
+    "mode,outcome",
+    [("full", "success"), ("remote_only", "success"), ("full", "delete"), ("full", "failure"), ("full", "timeout")],
+)
+async def test_title_free_provider_access(aiohttp_client, make_app, tmp_path, monkeypatch, mode, outcome):
+    import base64
+    import logging
+    import threading
+    import zlib
+    from types import SimpleNamespace
+
+    import click
+
+    from unshackle.commands.dl import dl
+    from unshackle.core.api import handlers
+    from unshackle.core.api.session_store import get_session_store
+    from unshackle.core.api.stats import stats
+    from unshackle.core.service import AUTH_ONLY_TITLE, Service
+
+    entered = threading.Event()
+    finish = threading.Event()
+    material = []
+    payload = {"message": "Pair", "code": "AB", "url": "https://tv.example", "expires_at": "2030-01-01T00:00:00Z"}
+    local = mode == "full"
+
+    class Provider:
+        cache = SimpleNamespace(service_tag="FAKE")
+        log = logging.getLogger("pairing-fixture")
+        observe_authentication = Service.observe_authentication
+
+        def get_titles(self):
+            pytest.fail("auth-only provider queried for titles")
+
+        def authenticate(self, cookies, credential):
+            material.append((cookies, credential))
+
+            def check():
+                entered.set()
+                assert finish.wait(5)
+                self._input_bridge.ensure_active()
+                if outcome == "failure":
+                    raise ValueError("device_code=private-fixture")
+                return None if outcome == "timeout" else True
+
+            Service.wait_for_approval(self, **payload, check=check, timeout=0 if outcome == "timeout" else 5)
+
+    @click.command()
+    @click.argument("title")
+    def cli(title):
+        assert title == AUTH_ONLY_TITLE == ""
+        return Provider()
+
+    monkeypatch.setattr(stats, "mode", mode)
+    monkeypatch.setattr(handlers.config, "serve", {})
+    monkeypatch.setattr(handlers.config.directories, "cache", tmp_path)
+    monkeypatch.setattr(handlers, "validate_service", lambda *args: "FAKE")
+    monkeypatch.setattr(handlers, "load_service_yaml", lambda *_: {})
+    monkeypatch.setattr(handlers, "load_full_cdm", lambda *_: None)
+    monkeypatch.setattr(handlers.Services, "load", lambda *_: SimpleNamespace(cli=cli))
+    monkeypatch.setattr(dl, "get_cookie_jar", lambda *_: "local cookies")
+    monkeypatch.setattr(dl, "get_credentials", lambda *_: "local credential")
+    client = await aiohttp_client(make_app())
+    encoded = base64.b64encode(zlib.compress(b'{"data":"test"}')).decode()
+    result = await client.post(
+        "/api/session/create",
+        json={"service": "FAKE", "auth_only": True, "no_proxy": True, "cache": {"fixture": encoded}},
+    )
+    assert result.status == 200, await result.text()
+    body = await result.json()
+    assert body["auth_only"] is True
+    sid = body["session_id"]
+    path = f"/api/session/{sid}"
+    session = get_session_store().peek(sid)
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        assert material == ([("local cookies", "local credential")] if local else [(None, None)])
+        assert (await (await client.get(path + "/prompt")).json())["approval"] == payload
+        with monkeypatch.context() as patch:
+            patch.setattr(session.input_bridge, "get_pending_approval", lambda: {"secret_fixture": "private fixture"})
+            invalid = await client.get(path + "/prompt")
+            assert invalid.status == 400
+            assert "fixture" not in await invalid.text()
+        for response in (await client.get(path + "/titles"), await client.post(path + "/tracks", json={})):
+            assert response.status == 400 and "Auth-only" in await response.text()
+        assert (await (await client.get(path)).json())["auth_only"] is True
+        if outcome == "delete":
+            assert (await client.delete(path)).status == 200
+            assert (await client.get(path + "/prompt")).status == 404
+            assert session.input_bridge.get_pending_approval() is None
+            return
+    finally:
+        finish.set()
+        await asyncio.gather(*handlers._auth_tasks)
+    completed = await (await client.get(path + "/prompt")).json()
+    assert "approval" not in completed
+    if outcome in {"timeout", "failure"}:
+        assert completed["status"] == "failed"
+        assert "private-fixture" not in completed["error"]
+        if outcome == "timeout":
+            assert completed["authentication"]["state"] == "timed_out"
+        assert (await client.delete(path)).status == 200
+        return
+    assert completed["status"] == "authenticated"
+    cache_dir = tmp_path / session.service_instance.cache.service_tag
+    assert (cache_dir / "fixture.json").exists() is (not local)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "saved.json").write_text("{}")
+    deleted = await client.delete(path)
+    assert deleted.status == 200
+    result = await deleted.json()
+    assert ("saved" in result.get("cache", {})) is (not local)
+    assert cache_dir.exists() is local

@@ -3,10 +3,13 @@ import base64
 import copy
 import enum
 import functools
+import inspect
 import json
 import logging
+import os
 import re
 import socket
+import tempfile
 import threading
 import time
 import uuid
@@ -16,9 +19,9 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date as date_
 from functools import partial
-from http.cookiejar import CookieJar
+from http.cookiejar import CookieJar, MozillaCookieJar
 from pathlib import Path
-from typing import AbstractSet, Any, Callable, Dict, Iterable, List, Optional, Set, cast
+from typing import AbstractSet, Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Union, cast
 from urllib.parse import urlsplit
 
 import click
@@ -31,6 +34,7 @@ from unshackle.core.api.progress import track_log_label
 from unshackle.core.api.sanitize import MAX_SESSION_CACHE_KEYS, safe_cache_key, safe_cache_payload, sanitize_log
 from unshackle.core.api.session_log import SessionLogBuffer, SessionLogMirror, capture_service_logs
 from unshackle.core.api.session_store import SessionStore
+from unshackle.core.approval import ApprovalNotice
 from unshackle.core.binaries import binary_version
 from unshackle.core.cacher import Cacher
 from unshackle.core.cdm.detect import cdm_type_stub, is_playready_cdm
@@ -40,6 +44,7 @@ from unshackle.core.drm import BlowfishStripe, cbcs, is_null_key
 from unshackle.core.manifests.snapshot import capture
 from unshackle.core.providers.anilist import parse_anilist_ref
 from unshackle.core.proxies.resolve import initialize_proxy_providers, is_loopback, resolve_proxy
+from unshackle.core.service import AUTH_ONLY_TITLE
 from unshackle.core.services import Services
 from unshackle.core.session import RnetSession, utf8_text
 from unshackle.core.titles import Episode, Movie, Song, Title_T
@@ -333,8 +338,21 @@ def instantiate_service(
     extras = cast_or_refuse(cli_params, parent_ctx, service_options(data, names, transport_keys))
     if data and data.get("service_params") is None:
         for k in names & transport_keys & data.keys():
-            if k not in ("service", "title_id", "proxy", "no_proxy") and data.get(k) is not None:
+            if k not in ("service", "title_id", "auth_only", "proxy", "no_proxy") and data.get(k) is not None:
                 log.warning(f"Ignoring flat '{sanitize_log(k)}' as a service option, send it under 'service_params'")
+    if getattr(parent_ctx, "params", None) and parent_ctx.params.get("auth_only"):
+        if not any(getattr(p, "name", None) == "title" for p in cli_params):
+            callback = getattr(service_module.cli, "callback", service_module.cli)
+            try:
+                param = inspect.signature(callback).parameters.get("title")
+            except (TypeError, ValueError):
+                param = None
+            if param is None or param.kind not in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                return parent_ctx.invoke(service_module.cli, **extras)
+        title = AUTH_ONLY_TITLE
     return parent_ctx.invoke(service_module.cli, title=title, **extras)
 
 
@@ -626,6 +644,17 @@ class RemoteLogin:
 _remote_logins: Dict[str, RemoteLogin] = {}
 
 
+def serialize_approval(approval: Optional[Union[ApprovalNotice, Mapping[str, object]]]) -> Optional[Dict[str, str]]:
+    if approval is None:
+        return None
+    try:
+        if not isinstance(approval, ApprovalNotice):
+            approval = ApprovalNotice.from_dict(approval)
+        return approval.to_dict()
+    except (TypeError, ValueError):
+        raise APIError(APIErrorCode.INVALID_INPUT, "Invalid approval payload") from None
+
+
 async def remote_logins_handler(request: web.Request) -> web.Response:
     """Answer the caller's remote logins with their prompt, approval, and redacted auth state."""
     owner, admin = caller_key(request), is_admin(request)
@@ -636,7 +665,7 @@ async def remote_logins_handler(request: web.Request) -> web.Response:
             "service": login.service,
             "title_id": login.title_id,
             "prompt": login.bridge.get_pending_prompt(),
-            "approval": approval.to_dict() if (approval := login.bridge.get_pending_approval()) is not None else None,
+            "approval": serialize_approval(login.bridge.get_pending_approval()),
             "authentication": (
                 observation.to_dict()
                 if (observation := login.bridge.get_authentication_observation()) is not None
@@ -3711,6 +3740,7 @@ async def env_check_handler(request: Optional[web.Request] = None) -> web.Respon
 
 
 SESSION_TRANSPORT_KEYS = {
+    "auth_only",
     "service",
     "title_id",
     "profile",
@@ -3854,6 +3884,136 @@ def client_device_cdm(
     )
 
 
+def uses_local_server_auth(normalized_service: str, *, auth_only: bool, server_account: bool) -> bool:
+    from unshackle.core.api.stats import stats
+
+    return (
+        auth_only
+        and not server_account
+        and stats.mode != "remote_only"
+        and server_account_spec(normalized_service) is None
+    )
+
+
+_COOKIE_SAVE_LOCK = threading.Lock()
+_COOKIE_SERVICE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _cookie_service_lock(normalized_service: str) -> threading.Lock:
+    with _COOKIE_SAVE_LOCK:
+        if normalized_service not in _COOKIE_SERVICE_LOCKS:
+            _COOKIE_SERVICE_LOCKS[normalized_service] = threading.Lock()
+        return _COOKIE_SERVICE_LOCKS[normalized_service]
+
+
+_CookieState = tuple[str, Optional[str], Optional[int], bool, bool, bool, tuple[tuple[str, Any], ...]]
+
+
+def _cookie_key(cookie: Any) -> tuple[str, str, str]:
+    path = "/" if cookie.path is None else cookie.path
+    return cookie.domain or "", path, cookie.name
+
+
+def _cookie_slot(cookie: Any) -> tuple[str, str, str]:
+    path = "/" if cookie.path is None else cookie.path
+    return (cookie.domain or "").lstrip(".").strip("[]").lower(), path, cookie.name
+
+
+def _cookie_state(cookie: Any) -> _CookieState:
+    return (
+        cookie.domain or "",
+        cookie.value,
+        cookie.expires,
+        bool(cookie.secure),
+        bool(getattr(cookie, "domain_specified", False)),
+        bool(getattr(cookie, "domain_initial_dot", False)),
+        tuple(sorted((getattr(cookie, "_rest", None) or {}).items())),
+    )
+
+
+def _auth_cookie_jar(raw_cookies: Any) -> Any:
+    export = getattr(raw_cookies, "persistable_jar", None)
+    if callable(export):
+        return export()
+    return getattr(raw_cookies, "jar", raw_cookies)
+
+
+def snapshot_auth_cookies(raw_cookies: Any) -> dict[tuple[str, str, str], _CookieState]:
+    if raw_cookies is None:
+        return {}
+    if isinstance(raw_cookies, dict):
+        return dict(raw_cookies)
+    jar = _auth_cookie_jar(raw_cookies)
+    try:
+        return {
+            _cookie_key(c): _cookie_state(c) for c in jar if getattr(c, "name", None) and getattr(c, "domain", None)
+        }
+    except TypeError:
+        return {}
+
+
+def save_local_auth_cookies(
+    normalized_service: str, profile: Optional[str], service_instance: Any, initial_cookies: Optional[Any] = None
+) -> None:
+    from unshackle.commands.dl import dl
+
+    raw_cookies = getattr(getattr(service_instance, "session", None), "cookies", None)
+    if raw_cookies is None:
+        return
+    jar = _auth_cookie_jar(raw_cookies)
+    try:
+        cookies = [c for c in jar if getattr(c, "name", None) and getattr(c, "domain", None)]
+    except TypeError:
+        return
+    if not cookies:
+        return
+
+    baseline = snapshot_auth_cookies(initial_cookies)
+    with _cookie_service_lock(normalized_service):
+        cookie_file = dl.get_cookie_path(normalized_service, profile)
+        target = dl.load_cookie_file(cookie_file) if cookie_file is not None and cookie_file.exists() else None
+        kept_keys = {_cookie_key(c) for c in cookies}
+        target_keys = {_cookie_key(existing) for existing in target or ()}
+        target_by_slot: dict[tuple[str, str, str], list[Any]] = {}
+        for existing in target or ():
+            target_by_slot.setdefault(_cookie_slot(existing), []).append(existing)
+        updates = [
+            c
+            for c in cookies
+            if _cookie_state(c) != baseline.get(_cookie_key(c))
+            or (
+                _cookie_key(c) not in target_keys
+                and all(_cookie_key(existing) in kept_keys for existing in target_by_slot.get(_cookie_slot(c), ()))
+            )
+        ]
+        if not updates:
+            return
+        if cookie_file is None:
+            cookie_file = config.directories.cookies / normalized_service / f"{profile or 'default'}.txt"
+            cookie_file.parent.mkdir(parents=True, exist_ok=True)
+        if target is None:
+            target = MozillaCookieJar(cookie_file)
+        for slot in {_cookie_slot(c) for c in updates}:
+            for existing in target_by_slot.get(slot, ()):
+                if _cookie_key(existing) not in kept_keys:
+                    try:
+                        target.clear(existing.domain, existing.path, existing.name)
+                    except KeyError:
+                        pass
+        for cookie in updates:
+            target.set_cookie(cookie)
+        with tempfile.NamedTemporaryFile(
+            dir=cookie_file.parent, prefix=f".{cookie_file.name}.", suffix=".tmp", delete=False
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            target.save(filename=str(tmp_path), ignore_discard=True, ignore_expires=True)
+            os.replace(tmp_path, cookie_file)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+
 def create_service_instance(
     normalized_service: str,
     title_id: str,
@@ -3866,6 +4026,8 @@ def create_service_instance(
     client_device: bool = False,
     input_bridge: Optional[InputBridge] = None,
     user_config: Optional[Dict[str, Any]] = None,
+    auth_only: bool = False,
+    local_server_auth: Optional[bool] = None,
 ) -> Any:
     """Make a service instance and resolve its credentials and cookies.
 
@@ -3874,10 +4036,8 @@ def create_service_instance(
     With ``client_device`` the service sees a stand-in for the client's device, which relays CDM calls
     through ``input_bridge`` when the client can answer them, and a config holding the client's own identity.
 
-    With ``server_account`` the service takes the server's own credential and cookie file for
-    ``profile`` and drops anything the client sent. Otherwise only client-sent data counts: a
-    client that sends nothing authenticates with nothing, because the server never lends its
-    own accounts.
+    Server-account and full-mode local logins use server credentials and cookies.
+    Client-owned sessions accept only the login material supplied by the client.
     """
     from unshackle.commands.dl import dl
     from unshackle.core.tracks import Video
@@ -3930,13 +4090,21 @@ def create_service_instance(
         **forwarded_dl_params(data),
     }
 
+    if local_server_auth is None:
+        local_server_auth = uses_local_server_auth(
+            normalized_service, auth_only=auth_only, server_account=server_account
+        )
     if server_account:
         cookies = server_account_cookies(normalized_service, profile)
+        credential = dl.get_credentials(normalized_service, profile)
+    elif local_server_auth:
+        cookies = dl.get_cookie_jar(normalized_service, profile)
         credential = dl.get_credentials(normalized_service, profile)
     else:
         credential = client_credential(data)
         cookies = load_client_cookies(data.get("cookies"))
 
+    extra_params["auth_only"] = auth_only
     extra_params["cookies_supplied"] = cookies is not None
     # A service with CLIENT_CONFIG reads these: with client_identity it uses only what the client sent,
     # and without it the server's identity, whose keys then come only from a vault.
@@ -3956,28 +4124,34 @@ def create_service_instance(
         extra_params=extra_params,
     )
 
-    service_instance = instantiate_service(parent_ctx, service_module, title_id, data, SESSION_TRANSPORT_KEYS)
+    service_instance = instantiate_service(
+        parent_ctx, service_module, AUTH_ONLY_TITLE if auth_only else title_id, data, SESSION_TRANSPORT_KEYS
+    )
 
     return service_instance, cookies, credential
 
 
 async def session_create_handler(data: Dict[str, Any], request: Optional[web.Request] = None) -> web.Response:
-    """Answer the remote session creation: authenticate + get titles + get tracks + get chapters.
-
-    This is the main entry point for remote-dl clients. It creates a persistent
-    remote session on the server with the authenticated service instance, fetches all
-    titles and tracks, and returns everything the client needs for track selection.
-    """
+    """Create the session and start authentication in the background."""
     from unshackle.core.api.session_store import get_session_store, refuse_while_draining
 
     refuse_while_draining()
+    if not isinstance(data, dict):
+        raise APIError(APIErrorCode.INVALID_INPUT, "Missing required parameter: service")
     service_tag = data.get("service")
     title_id = data.get("title_id")
     profile = client_profile(data)
 
-    if not service_tag:
+    if not isinstance(service_tag, str) or not service_tag.strip():
         raise APIError(APIErrorCode.INVALID_INPUT, "Missing required parameter: service")
-    if not title_id:
+    auth_only = data.get("auth_only", False)
+    if not isinstance(auth_only, bool):
+        raise APIError(APIErrorCode.INVALID_INPUT, "auth_only must be a boolean")
+    if auth_only:
+        if title_id is not None and (not isinstance(title_id, str) or title_id.strip()):
+            raise APIError(APIErrorCode.INVALID_INPUT, "auth_only sessions must not provide title_id")
+        title_id = AUTH_ONLY_TITLE
+    elif not isinstance(title_id, str) or not title_id.strip():
         raise APIError(APIErrorCode.INVALID_INPUT, "Missing required parameter: title_id")
 
     normalized_service = validate_service(service_tag, request)
@@ -3989,7 +4163,16 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
         )
 
     try:
-        proxy_param, proxy_providers = await asyncio.to_thread(resolve_handler_proxy, data, normalized_service, request)
+        server_account = server_account_for(request, normalized_service)
+        local_server_auth = uses_local_server_auth(
+            normalized_service, auth_only=auth_only, server_account=server_account
+        )
+        persistent_server_cache = server_account or local_server_auth
+        if local_server_auth and not server_accounts_allowed(request, normalized_service):
+            raise APIError(APIErrorCode.FORBIDDEN, "Server account access is required")
+        proxy_param, proxy_providers = await asyncio.to_thread(
+            resolve_handler_proxy, data, normalized_service, request, local_server_auth, server_account
+        )
 
         import uuid as uuid_mod
 
@@ -3999,7 +4182,6 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
         session_cache_dir = f"_sessions/{api_key_namespace(request)}/{session_id}/{normalized_service}"
         session_cache_tag: Optional[str] = session_cache_dir
 
-        server_account = server_account_for(request, normalized_service)
         if server_account:
             region = data.get("proxy_region") or data.get("client_region")
             if region is not None and not (isinstance(region, str) and re.fullmatch(r"[A-Za-z]{2}", region)):
@@ -4017,7 +4199,7 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
             and (max_height is not None or data.get("cdm_relay") is True)
         )
         bridge = InputBridge()
-        log_buffer = None if server_account else SessionLogBuffer()
+        log_buffer = None if persistent_server_cache else SessionLogBuffer()
         service_class_name = getattr(Services.load(normalized_service), "__name__", normalized_service)
 
         def build_service() -> Any:
@@ -4034,6 +4216,8 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
                     client_device=client_device,
                     input_bridge=bridge,
                     user_config=user_config,
+                    auth_only=auth_only,
+                    local_server_auth=local_server_auth,
                 )
 
         service_instance, cookies, credential = await asyncio.to_thread(build_service)
@@ -4044,7 +4228,9 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
         stand_in = getattr(getattr(getattr(service_instance, "ctx", None), "obj", None), "cdm", None)
         server_device = getattr(stand_in, "lent", False) is True
         cache_tag = f"_accounts/{normalized_service}/{profile or 'default'}" if server_account else session_cache_dir
-        if server_account:
+        if local_server_auth:
+            cache_tag = getattr(getattr(service_instance, "cache", None), "service_tag", None) or normalized_service
+        if persistent_server_cache:
             session_cache_tag = None
         service_instance.cache = keyed_cache(
             cache_tag,
@@ -4052,7 +4238,7 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
             normalized_service,
             api_key,
             user_config,
-            temporary=not server_account,
+            temporary=not persistent_server_cache,
             client_identity=client_device and not server_device,
         )
 
@@ -4070,6 +4256,7 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
             owner_key=api_key,
             creator_ip=request.remote if request else None,
             server_account=(profile or "default") if server_account else None,
+            auth_only=auth_only,
         )
         session.cache_tag = session_cache_tag
         session.user_config = user_config
@@ -4077,7 +4264,7 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
         session.server_cdm_max_height = max_height
         session.server_vault = client_device and server_vault_allowed(request, normalized_service)
         session.server_device = server_device
-        session.client_auth = not server_account and (
+        session.client_auth = not persistent_server_cache and (
             cookies is not None or credential is not None or bool(cache_data and session_cache_tag)
         )
         # Echoed to every dashboard viewer, so cap what an arbitrary client can push into it.
@@ -4089,8 +4276,13 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
 
         async def run_auth() -> None:
             try:
+                initial_cookies = snapshot_auth_cookies(cookies) if local_server_auth else None
                 await asyncio.to_thread(service_instance.authenticate, cookies, credential)
-                if not server_account:
+                if local_server_auth:
+                    await asyncio.to_thread(
+                        save_local_auth_cookies, normalized_service, profile, service_instance, initial_cookies
+                    )
+                if not persistent_server_cache:
                     session.client_auth = True
                 session.auth_status = AuthStatus.AUTHENTICATED
                 bridge.status = AuthStatus.AUTHENTICATED
@@ -4112,6 +4304,7 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
                 "session_id": session.session_id,
                 "service": normalized_service,
                 "status": "authenticating",
+                **({"auth_only": True} if auth_only else {}),
                 "server_account": server_account,
                 "server_cdm": use_server_cdm,
                 "server_cdm_max_height": max_height,
@@ -4127,7 +4320,11 @@ async def session_create_handler(data: Dict[str, Any], request: Optional[web.Req
         debug_mode = request.app.get("debug_api", False) if request else False
         return handle_api_exception(
             e,
-            context={"operation": "session_create", "service": service_tag, "title_id": title_id},
+            context={
+                "operation": "session_create",
+                "service": service_tag,
+                **({"auth_only": True} if auth_only else {"title_id": title_id}),
+            },
             debug_mode=debug_mode,
         )
 
@@ -4140,6 +4337,10 @@ async def session_titles_handler(session_id: str, request: Optional[web.Request]
     fetches titles.
     """
     session = await get_validated_session(session_id, request)
+    if getattr(session, "auth_only", False):
+        raise APIError(
+            APIErrorCode.INVALID_INPUT, "Auth-only sessions do not support title discovery", details={"auth_only": True}
+        )
     require_authenticated(session)
 
     try:
@@ -4259,6 +4460,10 @@ async def session_tracks_handler(
     auth flows (OTP, captcha) before the client requests any tracks.
     """
     session = await get_validated_session(session_id, request)
+    if getattr(session, "auth_only", False):
+        raise APIError(
+            APIErrorCode.INVALID_INPUT, "Auth-only sessions do not support title discovery", details={"auth_only": True}
+        )
     require_authenticated(session)
 
     title_id = data.get("title_id")
@@ -4585,7 +4790,9 @@ async def session_prompt_get_handler(session_id: str, request: Optional[web.Requ
     if session.auth_status == AuthStatus.AUTHENTICATED:
         # A service can ask for a device approval after login, and the client polls to show it.
         approval = bridge.get_pending_approval() if bridge else None
-        return response({"status": "authenticated", **({"approval": approval.to_dict()} if approval else {})})
+        return response(
+            {"status": "authenticated", **({"approval": serialize_approval(approval)} if approval is not None else {})}
+        )
 
     if session.auth_status == AuthStatus.FAILED:
         return response({"status": "failed", "error": session.auth_error or "unknown error"})
@@ -4595,8 +4802,8 @@ async def session_prompt_get_handler(session_id: str, request: Optional[web.Requ
         if prompt:
             return response({"status": "pending_input", "prompt": prompt})
         approval = bridge.get_pending_approval()
-        if approval:
-            return response({"status": "authenticating", "approval": approval.to_dict()})
+        if approval is not None:
+            return response({"status": "authenticating", "approval": serialize_approval(approval)})
 
     return response({"status": "authenticating"})
 
@@ -4705,7 +4912,11 @@ def local_proxy_refusal(proxy: str) -> Optional[str]:
 
 
 def resolve_handler_proxy(
-    data: Dict[str, Any], normalized_service: str, request: Optional[web.Request] = None
+    data: Dict[str, Any],
+    normalized_service: str,
+    request: Optional[web.Request] = None,
+    local_server_auth: bool = False,
+    server_account: Optional[bool] = None,
 ) -> tuple[Optional[str], list]:
     """Get the proxy and the proxy providers for an API request.
 
@@ -4724,16 +4935,15 @@ def resolve_handler_proxy(
     proxy_providers: list = []
     allowed = server_proxy_allowed(request)
 
-    if (
-        proxy_param
-        and re.match(r"^(https?://|socks|controld://|tunnel:)", str(proxy_param))
-        and server_account_for(request, normalized_service)
-    ):
-        raise APIError(
-            APIErrorCode.FORBIDDEN,
-            "A server-account service takes a country code or no proxy, not a proxy URI",
-            details={"service": normalized_service},
-        )
+    if proxy_param and re.match(r"^(https?://|socks|controld://|tunnel:)", str(proxy_param)):
+        if server_account is None:
+            server_account = server_account_for(request, normalized_service)
+        if server_account or local_server_auth:
+            raise APIError(
+                APIErrorCode.FORBIDDEN,
+                "A server-account service takes a country code or no proxy, not a proxy URI",
+                details={"service": normalized_service},
+            )
 
     if isinstance(proxy_param, str) and not no_proxy and not (allowed or is_admin(request)):
         refusal = local_proxy_refusal(proxy_param)
@@ -5866,6 +6076,7 @@ async def session_info_handler(session_id: str, request: Optional[web.Request] =
         {
             "session_id": session.session_id,
             "service": session.service_tag,
+            **({"auth_only": True} if getattr(session, "auth_only", False) else {}),
             "valid": True,
             "expires_in": get_session_store().ttl,
             "draining": get_session_store().draining,

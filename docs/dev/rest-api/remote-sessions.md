@@ -470,15 +470,20 @@ The server mounts all these routes, even in `--remote-only` mode. Paths use the
 
 ### Create: request and response
 
-`POST /api/session/create` requires `service` and `title_id`. It also accepts
-`credentials`, `cookies` (base64 of zlib-compressed Netscape cookie file), `proxy`,
-`no_proxy`, `profile`, `cache` (a map of `filename → base64(zlib(bytes))`),
-`client_region`, `server_cdm` (`false` when the user picked the local CDM), `cdm_type`, `cdm_security_level`, `cdm_relay` (`true` when the client
-answers CDM calls), `cdm_system_id` and `cdm_device_type` (Widevine only), `service_config`
-(the identity config keys the service lists in `client_config`), `client` (a freeform identity
-object the dashboard shows as sent), and the track-selection hints `range_`, `vcodec`,
-`quality`, `best_available`, `generate_dv`, plus arbitrary service CLI options
-(`additionalProperties: true`).
+`POST /api/session/create` requires a service and normally a nonblank `title_id`.
+Send `{"service": "EXAMPLE", "auth_only": true}` to start a provider login without selecting a title.
+A provider CLI that accepts a title receives `AUTH_ONLY_TITLE = ""`.
+A CLI without a title parameter receives no title argument.
+The titles and tracks endpoints return HTTP 400 for these sessions.
+
+A configured server account retains its existing grant and cache rules.
+For a service without a configured server account, a full-mode auth-only login uses the server profile's credentials, cookies and persistent service cache.
+This requires permission to use the server's accounts.
+The server ignores uploaded cache entries for these logins and keeps the cache on session deletion.
+In `remote_only` mode a client-managed login uses the client's material and a temporary session cache.
+Deleting the session returns the authenticated client's cache and removes the temporary directory.
+
+The request also accepts `credentials`, `cookies` (base64 of zlib-compressed Netscape cookie file), `proxy`, `no_proxy`, `profile`, `cache` (a map of `filename → base64(zlib(bytes))`), `client_region`, `server_cdm` (`false` when the user picked the local CDM), `cdm_type`, `cdm_security_level`, `cdm_relay` (`true` when the client answers CDM calls), `cdm_system_id` and `cdm_device_type` (Widevine only), `service_config` (the identity config keys the service lists in `client_config`), `client` (a freeform identity object the dashboard shows as sent), and the track-selection hints `range_`, `vcodec`, `quality`, `best_available`, `generate_dv`, plus arbitrary service CLI options (`additionalProperties: true`).
 
 `dl_params` holds the `dl` track selection: `lang`, `v_lang`, `a_lang` and `s_lang`
 (arrays of language strings), `acodec` (an array of audio codec names, such as
@@ -547,6 +552,10 @@ layer.
   seconds costs none. The notice can appear up to 15 seconds after the wait begins.
 - `AUTH_INPUT_TIMEOUT = 600.0` seconds. This is also the TTL granted to
   `AUTHENTICATING` / `PENDING_INPUT` sessions in the store.
+
+An `approval` contains a required `message` and may include an HTTPS `url`, a user-facing `code`, and a UTC `expires_at` timestamp.
+The server clears the notice on completion, timeout, cancellation or failure.
+Approval fields stay out of durable logs, job history and dashboard summaries.
 
 `GET /api/session/{id}/prompt` returns one of:
 
