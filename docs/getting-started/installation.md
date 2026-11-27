@@ -125,7 +125,7 @@ warning and prints the `directories` lines to add.
 
 | Requirement | Recommended version | Needed for |
 | --- | --- | --- |
-| [Python](https://www.python.org/) | 3.11 to 3.14 | Running unshackle itself |
+| [Python](https://www.python.org/) | 3.11.5 to 3.14 | Running unshackle itself |
 | [uv](https://docs.astral.sh/uv/) | ≥ 0.5 | Installing and running unshackle |
 | [FFmpeg](https://ffmpeg.org/) | ≥ 6.0, or ≥ 8.0 for H.266 | Media processing and analysis |
 | [MKVToolNix](https://mkvtoolnix.download/) | ≥ 80 | MKV muxing and metadata editing |
@@ -139,8 +139,8 @@ setup is complete.
 
 ## Python versions
 
-unshackle requires **Python 3.11 or newer, up to and including 3.14**
-(`requires-python = ">=3.11,<3.15"`). Anything older than 3.11 or 3.15 and
+unshackle requires **Python 3.11.5 or newer, up to and including 3.14**
+(`requires-python = ">=3.11.5,<3.15"`). Anything older than 3.11.5 or 3.15 and
 later is unsupported, and the installer refuses to assemble the environment.
 
 You do not usually need to install a matching Python interpreter by hand, since
