@@ -396,6 +396,42 @@ Every track carries the same fields as a local track: `is_original_lang`, `name`
 | `400` | `INVALID_SERVICE` | Unknown or disallowed service. |
 | `404` | `NO_CONTENT` | No matching episodes, or all matches failed. |
 
+### `GET /api/remote/logins`
+
+List the caller's `list-titles` and `list-tracks` calls that wait on the login of one of the server's `remote_services` servers. Poll it alongside such a call to show the user what the login needs. A remote `search` does not appear here. An admin key sees every caller's logins.
+
+=== "Response `200`"
+
+    ```json
+    {
+      "logins": [
+        { "id": "3f2c...", "remote": "my-server", "service": "EXAMPLE", "title_id": "12345",
+          "prompt": "Enter the code sent to your email:", "approval": null,
+          "authentication": { "state": "waiting", "method": "credentials" } }
+      ]
+    }
+    ```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | The `{login_id}` for the input route. |
+| `remote` | string | The name of the `remote_services` server the login runs on. |
+| `service`, `title_id` | string | The service and title of the call that waits. |
+| `prompt` | string or `null` | What the login asks the user (an OTP, a PIN). Answer it with `POST /api/remote/logins/{login_id}/input`. |
+| `approval` | object or `null` | `{"message": "..."}` while the login waits for an approval on another device, such as a pair code. It needs no answer. The object is transient: show it, but never write it to a log or a history. |
+| `authentication` | object or `null` | The login's redacted authentication state. See [Authentication state](job-lifecycle.md#authentication-state). |
+
+### `POST /api/remote/logins/{login_id}/input`
+
+Answer the prompt that a remote login waits on. Body: `{ "response": "..." }` (required). Returns `{ "status": "accepted" }`.
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `200` | - | Answer sent to the login. |
+| `400` | `INVALID_INPUT` | No `response` in the body. |
+| `404` | `NOT_FOUND` | No such login, or it belongs to another API key. |
+| `409` | `CONFLICT` | The login does not wait on a prompt. |
+
 ---
 
 ## Download jobs
@@ -755,8 +791,12 @@ example an OTP code, a PIN, or a device-code confirmation. The job then shows th
 answer here.
 
 A job that waits for an approval on another device, such as a pair code login, shows the
-message in its `notice` field instead. A notice needs no answer: show it to the user and keep
-polling.
+message in its `approval` field instead, as `{"message": "..."}`. An approval needs no answer:
+show it to the user and keep polling. The object is transient: it clears when the wait ends, the
+job history and the dashboard never get it, and a client must not log or store it. Any other
+message the service shows without asking for an answer is in `notice`. The job's
+`authentication` field reports the login's
+[authentication state](job-lifecycle.md#authentication-state).
 
 === "Request"
 
@@ -865,6 +905,10 @@ Read the persisted history of jobs that reached a terminal state, newest first. 
     }
     ```
 
+An entry also has `authentication` when the job's login reached a final
+[authentication state](job-lifecycle.md#authentication-state) (`authenticated`, `timed_out`,
+`cancelled` or `error`). The history never stores an earlier state or a device approval.
+
 | Status | Error code | Meaning |
 | --- | --- | --- |
 | `200` | - | History returned. |
@@ -934,6 +978,83 @@ Report the install status of the external binaries unshackle depends on (the sam
       ]
     }
     ```
+
+---
+
+## CDM devices
+
+Endpoints for the Widevine (`.wvd`) and PlayReady (`.prd`) device files in the server's `WVDs` and `PRDs` directories. A device's private keys never leave the server: the routes return only what its certificate says, and the test and the reprovision run on the server. A device is named by its file name without the extension.
+
+### `GET /api/cdm/devices`
+
+Describe every device file. Needs the `server_cdm` grant on the API key.
+
+=== "Response `200`"
+
+    ```json
+    {
+      "devices": [
+        { "kind": "widevine", "name": "my_l3", "system_id": 4464, "level": "L3", "type": "Android",
+          "vmp": false, "company": "...", "model": "...", "cdm_version": "..." },
+        { "kind": "playready", "name": "my_sl2000", "level": "SL2000", "company": "...",
+          "certificates": 4, "reprovisionable": true, "version": 3 }
+      ]
+    }
+    ```
+
+A Widevine entry can also have `product`, `architecture`, `patch_level` and `build`, when the device's client info sets them. A file that does not load is still listed, with `"unreadable": true` and the `error`.
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `200` | - | Devices returned. |
+| `403` | `FORBIDDEN` | The API key has no `server_cdm` grant. |
+
+### `POST /api/cdm/devices/test`
+
+Request a license with one device from the DRM vendor's own test server: Google's `widevine_test` endpoint for Widevine, Microsoft's PlayReady test server for PlayReady. A license means the certificate is healthy. Needs the `server_cdm` grant, and a key with a `devices` or `playready_devices` list can test only the devices on it.
+
+Body: `{ "kind": "widevine" | "playready", "name": "..." }`.
+
+=== "Healthy"
+
+    ```json
+    { "ok": true, "keys": 5 }
+    ```
+
+=== "Revoked"
+
+    ```json
+    { "ok": false, "revoked": true, "error": "Device certificate revoked (internal_status 127)" }
+    ```
+
+A test that fails for another reason, such as a test server that cannot be reached, also returns `200` with `"ok": false` and the `error`. The server runs at most 4 tests at a time, each with a 30-second timeout.
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `200` | - | Verdict returned. |
+| `400` | `INVALID_INPUT` | The body is not a JSON object, or `kind` or `name` is missing or not usable. |
+| `403` | `FORBIDDEN` | No `server_cdm` grant, or the key's device list does not include the device. |
+| `404` | `NOT_FOUND` | No such device. |
+
+### `POST /api/cdm/devices/reprovision`
+
+Give a PlayReady device a new leaf certificate and new encryption and signing keys, made from its group key. Only a device with a group key (version 3) can be reprovisioned. This replaces the device's credentials, so it needs an admin key (`admin: true` or the `api_secret`).
+
+Body: `{ "name": "..." }`. The server keeps the old file next to the new one as `<name>.backup-<timestamp>.bak`. The `.bak` suffix keeps the copy out of device discovery.
+
+=== "Response `200`"
+
+    ```json
+    { "backup": "my_sl2000.backup-20261120-064900.bak", "device": { "kind": "playready", "name": "my_sl2000", "...": "..." } }
+    ```
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `200` | - | Device reprovisioned. `device` is its new description. |
+| `400` | `INVALID_INPUT` | No usable `name`, or the device has no group key or is not provisioned. |
+| `403` | `FORBIDDEN` | The API key is not an admin key. |
+| `404` | `NOT_FOUND` | No such PlayReady device. |
+| `422` | `DRM_ERROR` | The new certificate chain did not verify. The device file is unchanged. |
 
 ---
 
@@ -1028,13 +1149,23 @@ A server-account service also refuses a client proxy URI, because the server's l
 
 ### `GET /api/session/{session_id}/prompt`
 
-Poll for the authentication status and any pending interactive prompt (OTP, PIN, device code). Response variants:
+Poll for the authentication status and any pending interactive prompt (OTP, PIN, device code) or device approval. Response variants:
 
 === "Authenticating"
 
     ```json
     { "status": "authenticating" }
     ```
+
+=== "Device approval"
+
+    ```json
+    { "status": "authenticating", "approval": { "message": "Open the provider and enter ABCD" } }
+    ```
+
+    The service waits for an approval on another device. It needs no answer: show the message and
+    keep polling. An `authenticated` remote session can carry an `approval` too, when the service
+    renews a login after authentication. The object is transient: never log or store it.
 
 === "Pending input"
 
@@ -1053,6 +1184,10 @@ Poll for the authentication status and any pending interactive prompt (OTP, PIN,
     ```json
     { "status": "failed", "error": "Invalid credentials" }
     ```
+
+Every variant also has `authentication` once the service reports its
+[authentication state](job-lifecycle.md#authentication-state), for example
+`{ "status": "authenticating", "authentication": { "state": "waiting", "method": "pairing" } }`.
 
 | Status | Error code | Meaning |
 | --- | --- | --- |

@@ -569,6 +569,13 @@ Approval fields stay out of durable logs, job history and dashboard summaries.
 { "status": "failed", "error": "...message..." }
 ```
 
+Each response also has `authentication` once the service reports its authentication state
+(`Service.observe_authentication`), for example `"authentication": {"state": "waiting", "method": "pairing"}`.
+See [Authentication state](job-lifecycle.md#authentication-state). The bridge takes new states and
+approvals until the remote session fails or is cancelled, so a service can report recovery after
+login too. `approval` is transient: it must not enter a log, a history or the dashboard, so the client
+shows it without logging it.
+
 A `cdm_call` comes first, in any auth state. The client answers it with a JSON object in
 `response`: `{"session": "...", "challenge": "<base64>"}` for `challenge`,
 `{"keys": [{"kid", "type", "key", "permissions"}]}` for `keys`, `{}` for `close`, or
